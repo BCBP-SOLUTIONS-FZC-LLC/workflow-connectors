@@ -1,0 +1,24 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - revive
+    - errcheck
+    - staticcheck
+    - bodyclose
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+    errcheck:
+      check-blank: false
+
+issues:
+  exclude-rules:
+    - path: '_test\.go'
+      linters:
+        - revive
