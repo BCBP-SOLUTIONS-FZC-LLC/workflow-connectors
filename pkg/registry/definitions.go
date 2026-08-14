@@ -20,7 +20,7 @@ func storageDefinition() Definition {
 			{Name: "content", Kind: FieldKindString, Condition: "small objects, inline"},
 			{Name: "contentType", Kind: FieldKindString},
 			{Name: "sizeBytes", Kind: FieldKindInt},
-			{Name: "fetchedAt", Kind: FieldKindString},
+			{Name: "fetchedAt", Kind: FieldKindTimestamp},
 		},
 		Retry: RetryPolicySafe,
 	}
@@ -46,7 +46,7 @@ func sendEmailDefinition() Definition {
 		Outputs: []Field{
 			{Name: "sent", Kind: FieldKindBool},
 			{Name: "messageId", Kind: FieldKindString},
-			{Name: "sentAt", Kind: FieldKindString},
+			{Name: "sentAt", Kind: FieldKindTimestamp},
 		},
 		Retry: RetryPolicyUnsafe,
 	}
@@ -80,7 +80,7 @@ func documentExtractDefinition() Definition {
 			{Name: "rawText", Kind: FieldKindString, Description: "Full-text extraction."},
 			{Name: "signaturesDetected", Kind: FieldKindList, Condition: "for analyzeSignatures"},
 			{Name: "answers", Kind: FieldKindList, Condition: "for analyzeQueries"},
-			{Name: "confidence", Kind: FieldKindFloat, Description: "Per-field confidence."},
+			{Name: "confidence", Kind: FieldKindMap, Description: "Per-field confidence, keyed by field name."},
 		},
 		Retry: RetryPolicySafe,
 	}
@@ -131,7 +131,7 @@ func chatNotifyDefinition() Definition {
 			{Name: "authToken", Kind: FieldKindSecretRef, Required: true, Description: "Author-supplied provider credential, resolved from its OpenBao secret path."},
 			{Name: "method", Kind: FieldKindEnum, Required: true, EnumValues: []string{"create-channel", "invite-to-channel", "post-message"}},
 			{Name: "channelName", Kind: FieldKindString, Condition: "only for create-channel"},
-			{Name: "visibility", Kind: FieldKindEnum, Condition: "only for create-channel"},
+			{Name: "visibility", Kind: FieldKindEnum, Condition: "only for create-channel", EnumValues: []string{"public", "private"}},
 			{Name: "inviteBy", Kind: FieldKindString, Condition: "only for invite-to-channel"},
 			{Name: "channelNameOrId", Kind: FieldKindString, Condition: "only for invite-to-channel"},
 			{Name: "users", Kind: FieldKindList, Condition: "only for invite-to-channel"},
