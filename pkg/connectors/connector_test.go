@@ -1,8 +1,6 @@
 package connectors_test
 
 import (
-	"context"
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,10 +10,15 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
+func validConfig() connectors.Config {
+	return connectors.Config{InternalToken: "test-token"}
+}
+
 func TestNew_SixTypes(t *testing.T) {
 	t.Parallel()
 
-	all := connectors.New()
+	all, err := connectors.New(validConfig())
+	require.NoError(t, err)
 	require.Len(t, all, 6)
 
 	for _, typ := range []string{
@@ -29,8 +32,12 @@ func TestNew_SixTypes(t *testing.T) {
 		c, ok := all[typ]
 		require.True(t, ok, "missing connector for %q", typ)
 		assert.Equal(t, typ, c.Type())
-
-		_, err := c.Execute(context.Background(), map[string]any{})
-		assert.True(t, errors.Is(err, connectors.ErrNotImplemented))
 	}
+}
+
+func TestNew_RequiresInternalToken(t *testing.T) {
+	t.Parallel()
+
+	_, err := connectors.New(connectors.Config{})
+	require.Error(t, err)
 }
