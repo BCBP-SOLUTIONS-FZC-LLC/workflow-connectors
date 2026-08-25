@@ -26,4 +26,4 @@ pkg/connectors/    ← Real Connector implementations (execution_service imports
 - [ ] `make ci` passes locally
 - [ ] New exported symbols have godoc comments
 - [ ] `CHANGELOG.md` `[Unreleased]` section updated
-- [ ] If a field table in `pkg/registry` changed: confirm it against `design/LLD/workflow_connectors.md` §6.4 directly, not from memory
+- [ ] If a field table in `pkg/registry` changed: confirm it against the LLD (`docs/lld/workflow_connectors.md`) §6.4 directly, not from memory

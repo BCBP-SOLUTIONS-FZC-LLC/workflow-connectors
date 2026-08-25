@@ -8,7 +8,7 @@ Report by email to **vijay@bcbpsolutions.com** with the subject line `[workflow-
 
 ## Trust model and known limitations
 
-`pkg/connectors`' real implementations will handle live provider credentials (resolved via `platform-secrets`, never a raw value in `IOMapping`/`context_json` — see `design/LLD/workflow_connectors.md` §6.2/§8). Any future `Connector` implementation must not log, cache, or otherwise persist a resolved credential outside the single `Execute()` call it was resolved for.
+`pkg/connectors`' real implementations will handle live provider credentials (resolved via `platform-secrets`, never a raw value in `IOMapping`/`context_json` — see the LLD §6.2/§8). Any future `Connector` implementation must not log, cache, or otherwise persist a resolved credential outside the single `Execute()` call it was resolved for.
 
 ## Scope
 

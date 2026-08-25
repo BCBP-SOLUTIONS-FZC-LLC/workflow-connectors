@@ -1,6 +1,6 @@
 # workflow-connectors
 
-Shared library for the workflow engine's automatic connector-task feature (`design/LLD/workflow_connectors.md`). Consumed as a private Go module — not deployed on its own.
+Shared library for the workflow engine's automatic connector-task feature. Full design: `docs/lld/workflow_connectors.md` (this repo's in-repo copy of the design repo's LLD, kept content-identical to it). Consumed as a private Go module — not deployed on its own.
 
 ## Packages
 
@@ -10,7 +10,7 @@ Shared library for the workflow engine's automatic connector-task feature (`desi
 
 ## v1 catalogue
 
-`storage`, `send-email`, `document-extract`, `rest-call`, `sql-query`, `chat-notify` — full field tables in `pkg/registry` and `design/LLD/workflow_connectors.md` §6.4.
+`storage`, `send-email`, `document-extract`, `rest-call`, `sql-query`, `chat-notify` — full field tables in `pkg/registry` and the LLD §6.4.
 
 ## Status
 
