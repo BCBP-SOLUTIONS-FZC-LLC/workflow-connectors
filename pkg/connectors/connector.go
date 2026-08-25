@@ -25,9 +25,10 @@ func New(cfg Config) (map[string]Connector, error) {
 		return nil, fmt.Errorf("connectors: InternalToken is required (rest-call/sql-query attach it to every outbound request)")
 	}
 
+	docRefs := newDocRefStore()
 	built := []Connector{
-		newStorage(cfg),
-		newSendEmail(cfg),
+		newStorage(cfg, docRefs),
+		newSendEmail(cfg, docRefs),
 		newDocumentExtract(cfg),
 		newChatNotify(cfg),
 		newRestCall(cfg),

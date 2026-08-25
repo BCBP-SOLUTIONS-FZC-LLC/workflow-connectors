@@ -11,9 +11,9 @@ type Config struct {
 	HTTPClient    *http.Client
 	InternalToken string
 
-	StorageProviders map[string]StorageProviderConstructor
+	StorageProviders   map[string]StorageProviderConstructor
+	SendEmailProviders map[string]SendEmailProviderConstructor
 
-	SendEmailClient       SendEmailProviderClient
 	DocumentExtractClient DocumentExtractProviderClient
 	ChatNotifyClient      ChatNotifyProviderClient
 }

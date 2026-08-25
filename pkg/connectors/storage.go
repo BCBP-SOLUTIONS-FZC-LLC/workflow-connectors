@@ -39,10 +39,10 @@ type storageConnector struct {
 	cache   map[string]StorageProviderClient
 }
 
-func newStorage(cfg Config) Connector {
+func newStorage(cfg Config, docRefs *docRefStore) Connector {
 	return &storageConnector{
 		providers: cfg.StorageProviders,
-		docRefs:   newDocRefStore(),
+		docRefs:   docRefs,
 		cache:     make(map[string]StorageProviderClient),
 	}
 }

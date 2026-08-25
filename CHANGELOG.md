@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `send-email` is real for all 4 providers (LLD §10 Decision #22): `sendgrid` (`sendgrid-go`), `aws-ses` (`aws-sdk-go-v2/service/sesv2`), `microsoft-365` (hand-rolled Graph `sendMail` REST call + `oauth2/clientcredentials`, not the official Kiota-generated SDK), `google-workspace` (`google.golang.org/api/gmail/v1`, domain-wide-delegation service account impersonating `senderEmail`). `Config.SendEmailClient` is replaced by `Config.SendEmailProviders map[string]SendEmailProviderConstructor`, mirroring `storage`'s per-call-construction-with-cache pattern exactly — `provider` is required, no default, and an unconfigured provider is `ErrValidation`, never a mock fallback. `microsoft-365`/`google-workspace` have no server-side template mechanism, so `body` is required for those two regardless of `templateId`. `attachments` entries (document refs) resolve to real bytes via a `docRefStore` now shared across `storage` and `send-email` (see Fixed below) — a filename is synthesized from the resolved content type since the field carries no per-attachment name of its own.
 - `pkg/connectors` — real `Execute()` implementations for all 6 v1 connector types, replacing the previous stubs. `rest-call`/`sql-query` dispatch over HTTP to internal platform services (resolved via the new `pkg/connectors/aliasconfig` static registry); `storage`/`send-email`/`document-extract`/`chat-notify` run against a small provider-client interface backed by an in-memory mock, swappable for a real SDK later via `Config`.
 - `pkg/connectors/aliasconfig` — the `endpointAlias`/`queryAlias` static-registry schema, `Load` (fail-fast validation), and `ResolveEndpoint`/`ResolveQuery`.
 - `connectors.New` now takes a `Config` (alias registry, HTTP client, internal token, provider-client overrides) and returns `(map[string]Connector, error)` — a breaking API change from the previous argument-less, infallible `New()`.
@@ -22,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `docRefStore` was owned per-connector-instance, constructed fresh inside `newStorage` — a doc ref minted by `storage`'s fetch (`createDocument: true`) was never resolvable by any other connector, silently breaking `send-email.attachments`' documented "list of document refs" contract. `connectors.New()` now constructs one `docRefStore` shared by `storage` and `send-email`.
+- `storage`'s `provider` field description still said "Defaults to aws-s3 when omitted" — stale since Decision #20 removed the default entirely.
 - `chat-notify.visibility` shipped as an enum field with no `EnumValues` — would have rendered as an empty dropdown to any UI consumer of `/connectors/registry`. Now `public`/`private`, matching `design/LLD/workflow_connectors.md` §6.4.6 (rev 7.2).
 - `document-extract.confidence` was a single scalar float; the LLD's own "per-field confidence" wording means it needs to be keyed by field name — now `FieldKindMap`.
 - `registry.All()`/`connectors.New()` silently overwrote a map entry on a duplicate `Type` (e.g. a copy-paste bug reusing a type constant); both now panic loudly instead.

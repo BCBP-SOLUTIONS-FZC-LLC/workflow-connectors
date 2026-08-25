@@ -103,8 +103,20 @@ func TestAll_FieldContents(t *testing.T) {
 	t.Run("send-email", func(t *testing.T) {
 		t.Parallel()
 		in, out := defs[registry.TypeSendEmail].Inputs, defs[registry.TypeSendEmail].Outputs
-		assert.False(t, hasField(in, "provider"), "no real per-provider implementation exists yet")
+		provider := fieldByName(t, in, "provider")
+		assert.Equal(t, registry.FieldKindEnum, provider.Kind)
+		assert.False(t, provider.Required)
+		assert.Equal(t, []string{"sendgrid", "aws-ses", "microsoft-365", "google-workspace"}, provider.EnumValues)
 		assert.True(t, fieldByName(t, in, "apiKey").IsSecretRef())
+		assert.True(t, fieldByName(t, in, "accessKey").IsSecretRef())
+		assert.True(t, fieldByName(t, in, "secretKey").IsSecretRef())
+		assert.True(t, fieldByName(t, in, "clientSecret").IsSecretRef())
+		assert.True(t, fieldByName(t, in, "serviceAccountKey").IsSecretRef())
+		assert.False(t, fieldByName(t, in, "tenantId").IsSecretRef(), "tenantId is an identifier, not a credential")
+		assert.False(t, fieldByName(t, in, "clientId").IsSecretRef(), "clientId is an identifier, not a credential")
+		for _, name := range []string{"apiKey", "accessKey", "secretKey", "region", "tenantId", "clientId", "clientSecret", "serviceAccountKey"} {
+			assert.NotEmptyf(t, fieldByName(t, in, name).Condition, "%s must declare which provider it's scoped to", name)
+		}
 		ct := fieldByName(t, in, "contentType")
 		assert.Equal(t, registry.FieldKindEnum, ct.Kind)
 		assert.ElementsMatch(t, []string{"text/plain", "text/html"}, ct.EnumValues)
