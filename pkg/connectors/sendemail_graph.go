@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"golang.org/x/oauth2/clientcredentials"
 )
@@ -108,8 +109,8 @@ type realGraphAPI struct {
 }
 
 func (r *realGraphAPI) sendMail(ctx context.Context, senderEmail string, body []byte) error {
-	url := fmt.Sprintf("%s/users/%s/sendMail", r.baseURL, senderEmail)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	endpoint := fmt.Sprintf("%s/users/%s/sendMail", r.baseURL, url.PathEscape(senderEmail))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

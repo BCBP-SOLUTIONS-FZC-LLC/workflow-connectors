@@ -173,6 +173,47 @@ func TestSendEmail_ProviderConstructorError_WrappedAsUpstream(t *testing.T) {
 	assert.True(t, errors.Is(err, connectors.ErrUpstream))
 }
 
+func TestSendEmail_SameCredentialsDifferentSender_DoesNotShareCachedClient(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	var built []string
+	cfg.SendEmailProviders = map[string]connectors.SendEmailProviderConstructor{
+		"google-workspace": func(_ context.Context, params map[string]any) (connectors.SendEmailProviderClient, error) {
+			client := connectors.NewMockSendEmailClient()
+			built = append(built, "built-for-a-call")
+			return client, nil
+		},
+	}
+	all, err := connectors.New(cfg)
+	require.NoError(t, err)
+
+	baseInput := map[string]any{
+		"provider":          "google-workspace",
+		"serviceAccountKey": "same-service-account",
+		"receiverEmail":     "b@example.com",
+		"body":              "hello",
+	}
+
+	first := map[string]any{}
+	for k, v := range baseInput {
+		first[k] = v
+	}
+	first["senderEmail"] = "alice@example.com"
+	_, err = all["send-email"].Execute(context.Background(), first)
+	require.NoError(t, err)
+
+	second := map[string]any{}
+	for k, v := range baseInput {
+		second[k] = v
+	}
+	second["senderEmail"] = "bob@example.com"
+	_, err = all["send-email"].Execute(context.Background(), second)
+	require.NoError(t, err)
+
+	assert.Len(t, built, 2, "identical credentials but different senderEmail must not share a cached client — the client is bound to a specific impersonated mailbox at construction time")
+}
+
 func TestSendEmail_AttachmentFromStorage_ResolvesViaSharedDocRefStore(t *testing.T) {
 	t.Parallel()
 

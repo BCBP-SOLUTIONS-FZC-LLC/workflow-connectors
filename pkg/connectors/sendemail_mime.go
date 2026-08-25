@@ -7,28 +7,44 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/textproto"
+	"strings"
 )
+
+// stripCRLF removes embedded carriage-return/line-feed characters. Several
+// EmailMessage fields (receiverName/receiverEmail especially — documented as
+// "typically sourced from workflow-instance data", i.e. end-user-submitted
+// form input) land directly in raw RFC 2822 header lines below; a value
+// containing "\r\n" could otherwise inject extra headers into the message.
+func stripCRLF(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
 
 // buildRawMIME builds an RFC 2822 message for APIs that only accept a raw
 // message body (Gmail's Users.messages.send).
 func buildRawMIME(msg EmailMessage) ([]byte, error) {
 	var buf bytes.Buffer
 
-	from := msg.SenderEmail
-	if msg.SenderName != "" {
-		from = mime.QEncoding.Encode("utf-8", msg.SenderName) + " <" + msg.SenderEmail + ">"
+	senderName := stripCRLF(msg.SenderName)
+	receiverName := stripCRLF(msg.ReceiverName)
+	subject := stripCRLF(msg.Subject)
+	senderEmail := stripCRLF(msg.SenderEmail)
+	receiverEmail := stripCRLF(msg.ReceiverEmail)
+
+	from := senderEmail
+	if senderName != "" {
+		from = mime.QEncoding.Encode("utf-8", senderName) + " <" + senderEmail + ">"
 	}
-	to := msg.ReceiverEmail
-	if msg.ReceiverName != "" {
-		to = mime.QEncoding.Encode("utf-8", msg.ReceiverName) + " <" + msg.ReceiverEmail + ">"
+	to := receiverEmail
+	if receiverName != "" {
+		to = mime.QEncoding.Encode("utf-8", receiverName) + " <" + receiverEmail + ">"
 	}
 
 	fmt.Fprintf(&buf, "From: %s\r\n", from)
 	fmt.Fprintf(&buf, "To: %s\r\n", to)
-	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", msg.Subject))
+	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	fmt.Fprintf(&buf, "MIME-Version: 1.0\r\n")
 
-	bodyContentType := msg.ContentType
+	bodyContentType := stripCRLF(msg.ContentType)
 	if bodyContentType == "" {
 		bodyContentType = "text/plain"
 	}

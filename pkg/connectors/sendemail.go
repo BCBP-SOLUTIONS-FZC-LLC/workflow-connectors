@@ -86,12 +86,12 @@ func (s *sendEmailConnector) Execute(ctx context.Context, input map[string]any) 
 		return nil, fmt.Errorf("%w: body is required for provider %q (no server-side template mechanism)", ErrValidation, provider)
 	}
 
-	client, err := s.clientFor(ctx, provider, input)
+	attachments, err := s.resolveAttachments(stringSliceField(input, "attachments"))
 	if err != nil {
 		return nil, err
 	}
 
-	attachments, err := s.resolveAttachments(stringSliceField(input, "attachments"))
+	client, err := s.clientFor(ctx, provider, input)
 	if err != nil {
 		return nil, err
 	}
@@ -152,9 +152,16 @@ func (s *sendEmailConnector) clientFor(ctx context.Context, provider string, inp
 	return client, nil
 }
 
+// emailCacheKey includes senderEmail alongside credentials: google-workspace's
+// client binds a specific impersonated mailbox at construction time (Subject
+// in newGmailProvider), so the same serviceAccountKey sending as two
+// different senderEmail values must not share a cached client — that would
+// silently send the second message impersonating the first sender.
 func emailCacheKey(provider string, input map[string]any) string {
 	h := sha256.New()
 	h.Write([]byte(provider))
+	h.Write([]byte{0})
+	h.Write([]byte(stringField(input, "senderEmail")))
 	names := append([]string(nil), emailCredentialFieldNames...)
 	sort.Strings(names)
 	for _, name := range names {
