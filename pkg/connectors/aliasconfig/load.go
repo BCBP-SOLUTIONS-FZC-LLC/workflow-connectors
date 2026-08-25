@@ -25,13 +25,17 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("aliasconfig: parsing %s: %w", path, err)
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("aliasconfig: %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func (c Config) validate() error {
+// Validate checks structural rules (duplicate aliases, valid method, required
+// fields) shared by every caller that persists or loads a Config — exported
+// so definition_service can reuse the same rules when writing an alias, not
+// just workflow-connectors when loading one.
+func (c Config) Validate() error {
 	seen := make(map[string]bool, len(c.RestCall))
 	for _, e := range c.RestCall {
 		if e.Alias == "" {
@@ -41,7 +45,7 @@ func (c Config) validate() error {
 			return fmt.Errorf("restCall: duplicate alias %q", e.Alias)
 		}
 		seen[e.Alias] = true
-		if !isValidMethod(e.Method) {
+		if !IsValidMethod(e.Method) {
 			return fmt.Errorf("restCall %q: invalid method %q", e.Alias, e.Method)
 		}
 		if e.BaseURL == "" {
@@ -77,7 +81,7 @@ func (c Config) validate() error {
 	return nil
 }
 
-func isValidMethod(m string) bool {
+func IsValidMethod(m string) bool {
 	switch strings.ToUpper(m) {
 	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch,
 		http.MethodDelete, http.MethodHead, http.MethodOptions:

@@ -2,7 +2,11 @@ package connectors
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,57 +14,60 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-// StorageProviderClient is the minimal surface storage's Execute needs from
-// an S3-compatible object store — deliberately SDK-agnostic so a real
-// AWS SDK/MinIO client can implement it later without touching Execute()
-// itself.
 type StorageProviderClient interface {
 	Fetch(ctx context.Context, bucket, key string) (content []byte, contentType string, err error)
 	Upload(ctx context.Context, bucket, key string, content []byte, contentType string) error
 	Delete(ctx context.Context, bucket, key string) error
 }
 
-// DocRefResolver is an optional capability a StorageProviderClient may
-// implement to resolve one of its own previously-minted document refs back
-// into bytes — only meaningful for the in-memory mock (MockStorageClient),
-// since a real SDK's document refs are self-describing (e.g. a bucket/key
-// pair) and never need this indirection.
-type DocRefResolver interface {
-	ResolveDocRef(ref string) (content []byte, contentType string, found bool)
+type StorageProviderConstructor func(ctx context.Context, params map[string]any) (StorageProviderClient, error)
+
+var credentialFieldNames = []string{
+	"accessKey", "secretKey", "region",
+	"azureAccountName", "azureAccountKey",
+	"gcpServiceAccountKey", "projectId",
+	"driveServiceAccountKey",
 }
 
-type docRefRegistrar interface {
-	RegisterDocRef(ref string, content []byte, contentType string)
-}
+const clientCacheLimit = 256
 
 type storageConnector struct {
-	client StorageProviderClient
+	providers map[string]StorageProviderConstructor
+	docRefs   *docRefStore
+
+	cacheMu sync.Mutex
+	cache   map[string]StorageProviderClient
 }
 
 func newStorage(cfg Config) Connector {
-	client := cfg.StorageClient
-	if client == nil {
-		client = NewMockStorageClient()
+	return &storageConnector{
+		providers: cfg.StorageProviders,
+		docRefs:   newDocRefStore(),
+		cache:     make(map[string]StorageProviderClient),
 	}
-	return storageConnector{client: client}
 }
 
-func (storageConnector) Type() string { return registry.TypeStorage }
+func (*storageConnector) Type() string { return registry.TypeStorage }
 
-func (s storageConnector) Execute(ctx context.Context, input map[string]any) (map[string]any, error) {
+func (s *storageConnector) Execute(ctx context.Context, input map[string]any) (map[string]any, error) {
 	bucket := stringField(input, "bucket")
 	key := stringField(input, "key")
 	if bucket == "" || key == "" {
 		return nil, fmt.Errorf("%w: bucket and key are required", ErrValidation)
 	}
 
+	client, err := s.clientFor(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+
 	switch stringField(input, "operation") {
 	case "fetch":
-		return s.fetch(ctx, bucket, key, input)
+		return s.fetch(ctx, client, bucket, key, input)
 	case "upload":
-		return s.upload(ctx, bucket, key, input)
+		return s.upload(ctx, client, bucket, key, input)
 	case "delete":
-		if err := s.client.Delete(ctx, bucket, key); err != nil {
+		if err := client.Delete(ctx, bucket, key); err != nil {
 			return nil, fmt.Errorf("%w: storage delete: %s", ErrUpstream, err)
 		}
 		return map[string]any{}, nil
@@ -69,8 +76,55 @@ func (s storageConnector) Execute(ctx context.Context, input map[string]any) (ma
 	}
 }
 
-func (s storageConnector) fetch(ctx context.Context, bucket, key string, input map[string]any) (map[string]any, error) {
-	content, contentType, err := s.client.Fetch(ctx, bucket, key)
+func (s *storageConnector) clientFor(ctx context.Context, input map[string]any) (StorageProviderClient, error) {
+	provider := stringField(input, "provider")
+	if provider == "" {
+		return nil, fmt.Errorf("%w: provider is required", ErrValidation)
+	}
+
+	ctor, ok := s.providers[provider]
+	if !ok {
+		return nil, fmt.Errorf("%w: provider %q is not configured", ErrValidation, provider)
+	}
+
+	key := cacheKey(provider, input)
+	s.cacheMu.Lock()
+	if cached, ok := s.cache[key]; ok {
+		s.cacheMu.Unlock()
+		return cached, nil
+	}
+	s.cacheMu.Unlock()
+
+	client, err := ctor(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("%w: build %s client: %s", ErrUpstream, provider, err)
+	}
+
+	s.cacheMu.Lock()
+	if len(s.cache) >= clientCacheLimit {
+		s.cache = make(map[string]StorageProviderClient)
+	}
+	s.cache[key] = client
+	s.cacheMu.Unlock()
+	return client, nil
+}
+
+func cacheKey(provider string, input map[string]any) string {
+	h := sha256.New()
+	h.Write([]byte(provider))
+	h.Write([]byte{0})
+	h.Write([]byte(stringField(input, "bucket")))
+	names := append([]string(nil), credentialFieldNames...)
+	sort.Strings(names)
+	for _, name := range names {
+		h.Write([]byte{0})
+		h.Write([]byte(stringField(input, name)))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *storageConnector) fetch(ctx context.Context, client StorageProviderClient, bucket, key string, input map[string]any) (map[string]any, error) {
+	content, contentType, err := client.Fetch(ctx, bucket, key)
 	if err != nil {
 		return nil, fmt.Errorf("%w: storage fetch: %s", ErrUpstream, err)
 	}
@@ -82,9 +136,7 @@ func (s storageConnector) fetch(ctx context.Context, bucket, key string, input m
 	}
 	if boolField(input, "createDocument") {
 		ref := mintDocRef()
-		if registrar, ok := s.client.(docRefRegistrar); ok {
-			registrar.RegisterDocRef(ref, content, contentType)
-		}
+		s.docRefs.register(ref, content, contentType)
 		out["contentRef"] = ref
 	} else {
 		out["content"] = string(content)
@@ -92,7 +144,7 @@ func (s storageConnector) fetch(ctx context.Context, bucket, key string, input m
 	return out, nil
 }
 
-func (s storageConnector) upload(ctx context.Context, bucket, key string, input map[string]any) (map[string]any, error) {
+func (s *storageConnector) upload(ctx context.Context, client StorageProviderClient, bucket, key string, input map[string]any) (map[string]any, error) {
 	content := stringField(input, "content")
 	if content == "" {
 		return nil, fmt.Errorf("%w: content is required for upload", ErrValidation)
@@ -100,19 +152,14 @@ func (s storageConnector) upload(ctx context.Context, bucket, key string, input 
 	raw := []byte(content)
 	contentType := stringField(input, "contentType")
 
-	// content is a document_ref field — it may be a ref this same client
-	// minted on an earlier fetch, in which case resolve it back to real
-	// bytes rather than uploading the literal reference string.
-	if resolver, ok := s.client.(DocRefResolver); ok {
-		if resolved, ct, found := resolver.ResolveDocRef(content); found {
-			raw = resolved
-			if contentType == "" {
-				contentType = ct
-			}
+	if resolved, ct, found := s.docRefs.resolve(content); found {
+		raw = resolved
+		if contentType == "" {
+			contentType = ct
 		}
 	}
 
-	if err := s.client.Upload(ctx, bucket, key, raw, contentType); err != nil {
+	if err := client.Upload(ctx, bucket, key, raw, contentType); err != nil {
 		return nil, fmt.Errorf("%w: storage upload: %s", ErrUpstream, err)
 	}
 	return map[string]any{"contentRef": mintDocRef(), "sizeBytes": len(raw)}, nil

@@ -1,10 +1,8 @@
-// Package aliasconfig defines and loads the static endpointAlias/queryAlias
-// registry cmd/connector-worker reads at startup (LLD workflow_connectors.md
-// §6.4.4/§6.4.5, Decision #12) — never a DB table, no admin CRUD API in v1.
-// It lives here rather than in execution_service so the schema has exactly
-// one owner: rest-call and sql-query's own Execute() implementations resolve
-// against the same Config a caller loads via Load, so the two repos that
-// need this shape never drift.
+// Package aliasconfig defines the endpointAlias/queryAlias registry schema
+// (LLD workflow_connectors.md §6.4.4/§6.4.5). definition_service owns and
+// serves it; execution_service's cmd/connector-worker fetches and caches it.
+// rest-call/sql-query's Execute() implementations resolve against the same
+// Config shape everywhere, so the services that need it never drift.
 package aliasconfig
 
 import "time"

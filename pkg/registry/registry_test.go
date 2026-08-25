@@ -60,6 +60,15 @@ func fieldByName(t *testing.T, fields []registry.Field, name string) registry.Fi
 	return registry.Field{}
 }
 
+func hasField(fields []registry.Field, name string) bool {
+	for _, f := range fields {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAll_FieldContents asserts on individual field shape — Kind, Required,
 // EnumValues — for every connector type, not just aggregate counts. This is
 // the class of bug (chat-notify.visibility shipping as an enum with zero
@@ -72,8 +81,18 @@ func TestAll_FieldContents(t *testing.T) {
 	t.Run("storage", func(t *testing.T) {
 		t.Parallel()
 		in, out := defs[registry.TypeStorage].Inputs, defs[registry.TypeStorage].Outputs
+		provider := fieldByName(t, in, "provider")
+		assert.Equal(t, registry.FieldKindEnum, provider.Kind)
+		assert.False(t, provider.Required)
+		assert.Equal(t, []string{"aws-s3", "azure-blob", "gcp-gcs", "google-drive"}, provider.EnumValues, "order is the default — aws-s3 must stay first")
 		assert.True(t, fieldByName(t, in, "accessKey").IsSecretRef())
 		assert.True(t, fieldByName(t, in, "secretKey").IsSecretRef())
+		for _, name := range []string{"azureAccountName", "azureAccountKey", "gcpServiceAccountKey", "driveServiceAccountKey"} {
+			f := fieldByName(t, in, name)
+			assert.Truef(t, f.IsSecretRef(), "%s must be a secret ref", name)
+			assert.NotEmptyf(t, f.Condition, "%s must declare which provider it's scoped to", name)
+		}
+		assert.Equal(t, registry.FieldKindString, fieldByName(t, in, "projectId").Kind)
 		op := fieldByName(t, in, "operation")
 		assert.Equal(t, registry.FieldKindEnum, op.Kind)
 		assert.ElementsMatch(t, []string{"fetch", "upload", "delete"}, op.EnumValues)
@@ -84,6 +103,7 @@ func TestAll_FieldContents(t *testing.T) {
 	t.Run("send-email", func(t *testing.T) {
 		t.Parallel()
 		in, out := defs[registry.TypeSendEmail].Inputs, defs[registry.TypeSendEmail].Outputs
+		assert.False(t, hasField(in, "provider"), "no real per-provider implementation exists yet")
 		assert.True(t, fieldByName(t, in, "apiKey").IsSecretRef())
 		ct := fieldByName(t, in, "contentType")
 		assert.Equal(t, registry.FieldKindEnum, ct.Kind)
@@ -94,6 +114,7 @@ func TestAll_FieldContents(t *testing.T) {
 	t.Run("document-extract", func(t *testing.T) {
 		t.Parallel()
 		in, out := defs[registry.TypeDocumentExtract].Inputs, defs[registry.TypeDocumentExtract].Outputs
+		assert.False(t, hasField(in, "provider"), "no real per-provider implementation exists yet")
 		assert.True(t, fieldByName(t, in, "accessKey").IsSecretRef())
 		assert.True(t, fieldByName(t, in, "secretKey").IsSecretRef())
 		loc := fieldByName(t, in, "documentLocation")
@@ -129,6 +150,7 @@ func TestAll_FieldContents(t *testing.T) {
 	t.Run("chat-notify", func(t *testing.T) {
 		t.Parallel()
 		in := defs[registry.TypeChatNotify].Inputs
+		assert.False(t, hasField(in, "provider"), "no real per-provider implementation exists yet")
 		assert.True(t, fieldByName(t, in, "authToken").IsSecretRef())
 		method := fieldByName(t, in, "method")
 		assert.Equal(t, registry.FieldKindEnum, method.Kind)

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `registry.IsIdempotentMethod` — resolves `rest-call`'s conditional retry policy per-call (GET/HEAD/PUT/DELETE/OPTIONS/TRACE idempotent, POST/PATCH not) — a signal `Definition.Retry` alone couldn't express.
 - `registry.Field.IsSecretRef()` — one place to check whether a field's value must come from OpenBao rather than travel inline, instead of every caller hand-rolling `f.Kind == FieldKindSecretRef`.
 - `registry.FieldKindTimestamp` — `storage.fetchedAt`/`send-email.sentAt` no longer fall back to a plain string.
+- `storage` is real for all 4 providers (LLD §10 Decision #19/#20): `aws-s3`/`azure-blob`/`gcp-gcs` via `gocloud.dev/blob` (new `storage_gocloud.go`), `google-drive` via its own client (new `storage_drive.go`, search-by-name-in-folder + update-if-found/create-otherwise for idempotent uploads, Shared Drive-aware). New provider-specific registry fields, named globally-unique across providers on purpose: `azureAccountName`/`azureAccountKey`, `gcpServiceAccountKey`/`projectId`, `driveServiceAccountKey`. `Config.StorageClient` is replaced by `Config.StorageProviders map[string]StorageProviderConstructor` — a per-call constructor per provider (credentials are per-tenant, resolved fresh per call) with a small bounded client cache. `provider` is required — no default, and an unconfigured/unimplemented provider is a validation error, never a fallback.
+- `docref.go` — a `storageConnector`-owned doc-ref store, replacing the old per-client `DocRefResolver`/`docRefRegistrar` optional-interface pattern (only ever worked because tests reused one mock instance across calls; a real, per-call-constructed provider client can't carry that state itself).
 
 ### Fixed
 
@@ -24,3 +26,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `document-extract.confidence` was a single scalar float; the LLD's own "per-field confidence" wording means it needs to be keyed by field name — now `FieldKindMap`.
 - `registry.All()`/`connectors.New()` silently overwrote a map entry on a duplicate `Type` (e.g. a copy-paste bug reusing a type constant); both now panic loudly instead.
 - Per-field registry tests added (`Name`/`Kind`/`Required`/`EnumValues` for all 6 types) — aggregate-count-only assertions had let the `visibility` bug above ship unnoticed.
+- `send-email`/`document-extract`/`chat-notify` briefly had a `provider` field with zero real per-provider implementation behind it (a mock-only client for all providers) — removed until each ships real code, matching LLD Decision #20.
+- `storageConnector` silently fell back to an in-memory mock for any unconfigured provider, and defaulted a missing `provider` to `aws-s3` — both removed; both are now `ErrValidation`.

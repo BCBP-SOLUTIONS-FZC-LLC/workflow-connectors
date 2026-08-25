@@ -11,22 +11,26 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors"
 )
 
-func storageConfig(client *connectors.MockStorageClient) connectors.Config {
+func mockStorageConfig(client *connectors.MockStorageClient) connectors.Config {
 	cfg := validConfig()
-	cfg.StorageClient = client
+	cfg.StorageProviders = map[string]connectors.StorageProviderConstructor{
+		"aws-s3": func(context.Context, map[string]any) (connectors.StorageProviderClient, error) {
+			return client, nil
+		},
+	}
 	return cfg
 }
 
 func TestStorage_UploadThenFetch_RoundTrips(t *testing.T) {
 	t.Parallel()
 
-	client := connectors.NewMockStorageClient()
-	all, err := connectors.New(storageConfig(client))
+	all, err := connectors.New(mockStorageConfig(connectors.NewMockStorageClient()))
 	require.NoError(t, err)
 	storage := all["storage"]
 
 	uploadOut, err := storage.Execute(context.Background(), map[string]any{
 		"operation":   "upload",
+		"provider":    "aws-s3",
 		"bucket":      "b1",
 		"key":         "k1",
 		"content":     "hello world",
@@ -37,6 +41,7 @@ func TestStorage_UploadThenFetch_RoundTrips(t *testing.T) {
 
 	fetchOut, err := storage.Execute(context.Background(), map[string]any{
 		"operation": "fetch",
+		"provider":  "aws-s3",
 		"bucket":    "b1",
 		"key":       "k1",
 	})
@@ -45,17 +50,63 @@ func TestStorage_UploadThenFetch_RoundTrips(t *testing.T) {
 	assert.Equal(t, "text/plain", fetchOut["contentType"])
 }
 
-func TestStorage_FetchWithCreateDocument_MintsResolvableRef(t *testing.T) {
+func TestStorage_MissingProvider_IsValidationError(t *testing.T) {
 	t.Parallel()
 
-	client := connectors.NewMockStorageClient()
-	require.NoError(t, client.Upload(context.Background(), "b1", "k1", []byte("payload"), "text/plain"))
-	all, err := connectors.New(storageConfig(client))
+	all, err := connectors.New(mockStorageConfig(connectors.NewMockStorageClient()))
 	require.NoError(t, err)
 	storage := all["storage"]
 
+	_, err = storage.Execute(context.Background(), map[string]any{
+		"operation":   "upload",
+		"bucket":      "b1",
+		"key":         "k1",
+		"content":     "x",
+		"contentType": "text/plain",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, connectors.ErrValidation))
+}
+
+func TestStorage_UnconfiguredProvider_IsValidationError(t *testing.T) {
+	t.Parallel()
+
+	all, err := connectors.New(mockStorageConfig(connectors.NewMockStorageClient()))
+	require.NoError(t, err)
+	storage := all["storage"]
+
+	_, err = storage.Execute(context.Background(), map[string]any{
+		"operation":   "upload",
+		"provider":    "google-drive",
+		"bucket":      "folder1",
+		"key":         "k1",
+		"content":     "y",
+		"contentType": "text/plain",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, connectors.ErrValidation))
+}
+
+func TestStorage_FetchWithCreateDocument_MintsResolvableRef(t *testing.T) {
+	t.Parallel()
+
+	all, err := connectors.New(mockStorageConfig(connectors.NewMockStorageClient()))
+	require.NoError(t, err)
+	storage := all["storage"]
+
+	_, err = storage.Execute(context.Background(), map[string]any{
+		"operation":   "upload",
+		"provider":    "aws-s3",
+		"bucket":      "b1",
+		"key":         "k1",
+		"content":     "payload",
+		"contentType": "text/plain",
+	})
+	require.NoError(t, err)
+
 	fetchOut, err := storage.Execute(context.Background(), map[string]any{
 		"operation":      "fetch",
+		"provider":       "aws-s3",
 		"bucket":         "b1",
 		"key":            "k1",
 		"createDocument": true,
@@ -67,9 +118,9 @@ func TestStorage_FetchWithCreateDocument_MintsResolvableRef(t *testing.T) {
 	_, hasInlineContent := fetchOut["content"]
 	assert.False(t, hasInlineContent)
 
-	// Uploading that same ref elsewhere resolves back to the original bytes.
 	uploadOut, err := storage.Execute(context.Background(), map[string]any{
 		"operation": "upload",
+		"provider":  "aws-s3",
 		"bucket":    "b2",
 		"key":       "k2",
 		"content":   ref,
@@ -81,7 +132,7 @@ func TestStorage_FetchWithCreateDocument_MintsResolvableRef(t *testing.T) {
 func TestStorage_MissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
-	all, err := connectors.New(storageConfig(connectors.NewMockStorageClient()))
+	all, err := connectors.New(mockStorageConfig(connectors.NewMockStorageClient()))
 	require.NoError(t, err)
 	storage := all["storage"]
 
@@ -93,13 +144,45 @@ func TestStorage_MissingRequiredFields(t *testing.T) {
 func TestStorage_UnknownOperation(t *testing.T) {
 	t.Parallel()
 
-	all, err := connectors.New(storageConfig(connectors.NewMockStorageClient()))
+	all, err := connectors.New(mockStorageConfig(connectors.NewMockStorageClient()))
 	require.NoError(t, err)
 	storage := all["storage"]
 
-	_, err = storage.Execute(context.Background(), map[string]any{"operation": "frobnicate", "bucket": "b", "key": "k"})
+	_, err = storage.Execute(context.Background(), map[string]any{"operation": "frobnicate", "provider": "aws-s3", "bucket": "b", "key": "k"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, connectors.ErrValidation))
+}
+
+func TestStorage_ProviderError_Propagates(t *testing.T) {
+	t.Parallel()
+
+	client := connectors.NewMockStorageClient()
+	client.SetError(errors.New("boom"))
+	all, err := connectors.New(mockStorageConfig(client))
+	require.NoError(t, err)
+	storage := all["storage"]
+
+	_, err = storage.Execute(context.Background(), map[string]any{"operation": "delete", "provider": "aws-s3", "bucket": "b", "key": "k"})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, connectors.ErrUpstream))
+}
+
+func TestStorage_ProviderConstructorError_WrappedAsUpstream(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	cfg.StorageProviders = map[string]connectors.StorageProviderConstructor{
+		"aws-s3": func(context.Context, map[string]any) (connectors.StorageProviderClient, error) {
+			return nil, errors.New("bad credentials")
+		},
+	}
+	all, err := connectors.New(cfg)
+	require.NoError(t, err)
+	storage := all["storage"]
+
+	_, err = storage.Execute(context.Background(), map[string]any{"operation": "delete", "provider": "aws-s3", "bucket": "b", "key": "k"})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, connectors.ErrUpstream))
 }
 
 func TestMockStorageClient_SetErrorAndReset(t *testing.T) {
@@ -116,18 +199,4 @@ func TestMockStorageClient_SetErrorAndReset(t *testing.T) {
 	content, _, err := client.Fetch(context.Background(), "b", "k")
 	require.NoError(t, err)
 	assert.Equal(t, "x", string(content))
-}
-
-func TestStorage_ProviderError_Propagates(t *testing.T) {
-	t.Parallel()
-
-	client := connectors.NewMockStorageClient()
-	client.SetError(errors.New("boom"))
-	all, err := connectors.New(storageConfig(client))
-	require.NoError(t, err)
-	storage := all["storage"]
-
-	_, err = storage.Execute(context.Background(), map[string]any{"operation": "delete", "bucket": "b", "key": "k"})
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, connectors.ErrUpstream))
 }
