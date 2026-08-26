@@ -39,10 +39,6 @@ const (
 	RetryPolicyConditional RetryPolicy = "conditional"
 )
 
-// IsIdempotentMethod resolves RetryPolicyConditional's per-call condition for
-// rest-call: retryable only when the resolved HTTP method is itself
-// idempotent. A dispatcher has no other signal to key off, since
-// Definition.Retry is one static value per connector type.
 func IsIdempotentMethod(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions, http.MethodTrace:
@@ -61,10 +57,7 @@ type Field struct {
 	Description string
 }
 
-// IsSecretRef reports whether f's value must be resolved from OpenBao rather
-// than carried inline — the one distinction every consumer that special-cases
-// credential fields needs, kept here so that check isn't hand-rolled per
-// caller.
+// IsSecretRef reports whether f's value must be resolved from OpenBao
 func (f Field) IsSecretRef() bool {
 	return f.Kind == FieldKindSecretRef
 }

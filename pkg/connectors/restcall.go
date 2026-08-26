@@ -19,10 +19,6 @@ const (
 )
 
 // restCall dispatches to another platform service's own internal HTTP API,
-// resolved via endpointAlias — never a raw URL (LLD §6.4.4). It never
-// retries internally: registry.RetryPolicyConditional's decision (is the
-// resolved method idempotent?) is the caller's to make, using
-// aliasconfig.ResolveEndpoint + registry.IsIdempotentMethod before dispatch.
 type restCall struct {
 	cfg Config
 }

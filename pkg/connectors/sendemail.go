@@ -12,9 +12,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-// SendEmailProviderClient is the minimal surface an email-sending provider
-// needs to expose — SDK-agnostic so a real provider client can implement it
-// later without touching Execute() itself.
 type SendEmailProviderClient interface {
 	Send(ctx context.Context, msg EmailMessage) (messageID string, err error)
 }
@@ -152,11 +149,6 @@ func (s *sendEmailConnector) clientFor(ctx context.Context, provider string, inp
 	return client, nil
 }
 
-// emailCacheKey includes senderEmail alongside credentials: google-workspace's
-// client binds a specific impersonated mailbox at construction time (Subject
-// in newGmailProvider), so the same serviceAccountKey sending as two
-// different senderEmail values must not share a cached client — that would
-// silently send the second message impersonating the first sender.
 func emailCacheKey(provider string, input map[string]any) string {
 	h := sha256.New()
 	h.Write([]byte(provider))
@@ -171,10 +163,6 @@ func emailCacheKey(provider string, input map[string]any) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// resolveAttachments turns each attachments entry — a doc ref minted by a
-// prior storage fetch — into its actual bytes. A filename is synthesized
-// from the resolved content type since the registry field carries no
-// per-attachment name.
 func (s *sendEmailConnector) resolveAttachments(refs []string) ([]EmailAttachment, error) {
 	if len(refs) == 0 {
 		return nil, nil

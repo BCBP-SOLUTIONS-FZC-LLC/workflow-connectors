@@ -5,12 +5,6 @@ import (
 	"fmt"
 )
 
-// Connector executes one connector-task invocation. Its own retry/backoff
-// behavior is never internal — cmd/connector-worker's dispatcher owns that,
-// keyed off registry.Definition.Retry. input carries author-supplied config
-// with every registry.Field.IsSecretRef() value already resolved to its real
-// credential by the caller — Connector implementations never see an OpenBao
-// path, only the value.
 type Connector interface {
 	Type() string
 	Execute(ctx context.Context, input map[string]any) (map[string]any, error)

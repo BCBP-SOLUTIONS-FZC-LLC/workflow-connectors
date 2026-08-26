@@ -9,9 +9,6 @@ import (
 	"strings"
 )
 
-// asMap safely type-asserts an `any` from a connector's input map into
-// map[string]any, treating anything else (nil, wrong type) as empty rather
-// than panicking — author-supplied input is untrusted shape, not a Go type.
 func asMap(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
@@ -41,9 +38,6 @@ func stringSliceField(m map[string]any, key string) []string {
 	return out
 }
 
-// renderPathTemplate substitutes {name} placeholders in tmpl from params,
-// URL-path-escaping every substituted value. An unresolved placeholder is a
-// validation error, not a literal "{name}" left in the URL.
 func renderPathTemplate(tmpl string, params map[string]any) (string, error) {
 	var b strings.Builder
 	i := 0
@@ -87,8 +81,6 @@ func flattenHeaders(h http.Header) map[string]any {
 	return out
 }
 
-// decodeResponseBody returns a JSON-decoded body when the response says
-// it's JSON, else the raw text — never silently dropped either way.
 func decodeResponseBody(resp *http.Response) (any, error) {
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -100,8 +92,7 @@ func decodeResponseBody(resp *http.Response) (any, error) {
 	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		var v any
 		if err := json.Unmarshal(raw, &v); err != nil {
-			// Mislabeled Content-Type shouldn't fail the whole call — fall
-			// back to raw text.
+			// Mislabeled Content-Type shouldn't fail the whole call
 			return string(raw), nil
 		}
 		return v, nil

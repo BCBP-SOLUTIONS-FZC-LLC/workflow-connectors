@@ -15,10 +15,7 @@ import (
 // sqlQuery is deliberately structured like restCall, not a direct database
 // connection: an owning service's own internal query-execution endpoint
 // resolves queryId against its own pre-registered, read-only statement and
-// performs the actual parameter binding — this connector never sees or
-// constructs SQL text (LLD §6.4.5), and x-internal-token/x-departments are
-// real HTTP headers rather than a meaningless attempt to attach them to a
-// raw DB connection.
+// performs the actual parameter binding
 type sqlQuery struct {
 	cfg Config
 }

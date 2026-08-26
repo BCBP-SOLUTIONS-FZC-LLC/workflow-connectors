@@ -6,10 +6,6 @@ import (
 	"sync"
 )
 
-// MockDocumentExtractClient returns deterministic canned data keyed off the
-// request's own analyze-flags, rather than a static empty struct — a test
-// can assert the exact canned shape for a given flag combination, while it
-// stays an obvious placeholder for the real OCR/extraction provider.
 type MockDocumentExtractClient struct {
 	mu  sync.Mutex
 	err error

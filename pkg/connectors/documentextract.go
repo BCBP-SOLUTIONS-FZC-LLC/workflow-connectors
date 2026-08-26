@@ -7,9 +7,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-// DocumentExtractProviderClient is the minimal surface an OCR/document
-// analysis provider needs to expose — SDK-agnostic so a real provider client
-// can implement it later without touching Execute() itself.
 type DocumentExtractProviderClient interface {
 	Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeResult, error)
 }

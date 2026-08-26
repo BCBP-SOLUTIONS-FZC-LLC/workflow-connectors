@@ -7,18 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// ChatCall records one call made against MockChatNotifyClient — Method is
-// the chat-notify method name, Args its positional string arguments (users
-// joined in for invite-to-channel).
 type ChatCall struct {
 	Method string
 	Args   []string
 }
 
-// MockChatNotifyClient records every call it receives — a mutex-guarded
-// recorder mock (mirrors platform-events/pkg/events/mock's own pattern) so a
-// test can assert exactly what would have been sent, without any real
-// provider.
 type MockChatNotifyClient struct {
 	mu    sync.Mutex
 	calls []ChatCall

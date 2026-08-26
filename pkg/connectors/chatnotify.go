@@ -7,9 +7,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-// ChatNotifyProviderClient is the minimal surface a chat/notification
-// provider (Slack/Teams-shaped) needs to expose — SDK-agnostic so a real
-// provider client can implement it later without touching Execute() itself.
 type ChatNotifyProviderClient interface {
 	CreateChannel(ctx context.Context, name, visibility string) (channelID string, err error)
 	InviteToChannel(ctx context.Context, channelNameOrID string, users []string) error

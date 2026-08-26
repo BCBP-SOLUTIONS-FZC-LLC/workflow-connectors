@@ -10,17 +10,11 @@ import (
 	"strings"
 )
 
-// stripCRLF removes embedded carriage-return/line-feed characters. Several
-// EmailMessage fields (receiverName/receiverEmail especially — documented as
-// "typically sourced from workflow-instance data", i.e. end-user-submitted
-// form input) land directly in raw RFC 2822 header lines below; a value
 // containing "\r\n" could otherwise inject extra headers into the message.
 func stripCRLF(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
 }
 
-// buildRawMIME builds an RFC 2822 message for APIs that only accept a raw
-// message body (Gmail's Users.messages.send).
 func buildRawMIME(msg EmailMessage) ([]byte, error) {
 	var buf bytes.Buffer
 

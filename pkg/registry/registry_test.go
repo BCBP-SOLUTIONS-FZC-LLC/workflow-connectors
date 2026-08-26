@@ -46,9 +46,6 @@ func TestAll_RetryPolicies(t *testing.T) {
 	assert.Equal(t, registry.RetryPolicyUnsafe, defs[registry.TypeChatNotify].Retry)
 }
 
-// fieldByName finds a field by name in a slice, failing the test if absent —
-// every per-field assertion below anchors on a field that must exist, so a
-// dropped field fails loudly instead of the assertion silently never running.
 func fieldByName(t *testing.T, fields []registry.Field, name string) registry.Field {
 	t.Helper()
 	for _, f := range fields {
@@ -69,10 +66,6 @@ func hasField(fields []registry.Field, name string) bool {
 	return false
 }
 
-// TestAll_FieldContents asserts on individual field shape — Kind, Required,
-// EnumValues — for every connector type, not just aggregate counts. This is
-// the class of bug (chat-notify.visibility shipping as an enum with zero
-// EnumValues) that aggregate-only assertions miss entirely.
 func TestAll_FieldContents(t *testing.T) {
 	t.Parallel()
 

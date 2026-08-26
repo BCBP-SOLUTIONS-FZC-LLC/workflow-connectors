@@ -7,10 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// MockSendEmailClient records every EmailMessage it's asked to send — a
-// mutex-guarded recorder mock (mirrors platform-events/pkg/events/mock's own
-// pattern) so a test can assert exactly what would have been sent, without
-// any real provider.
 type MockSendEmailClient struct {
 	mu   sync.Mutex
 	sent []EmailMessage

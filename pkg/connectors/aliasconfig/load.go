@@ -9,11 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Load reads and validates the alias registry file at path, failing fast on
-// any structural problem — a duplicate alias, a bad method, a missing
-// required field. This runs once at cmd/connector-worker startup, so a
-// mistake here should stop the process rather than surface later as a
-// dispatch-time failure against some unlucky task.
 func Load(path string) (Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -31,10 +26,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate checks structural rules (duplicate aliases, valid method, required
-// fields) shared by every caller that persists or loads a Config — exported
-// so definition_service can reuse the same rules when writing an alias, not
-// just workflow-connectors when loading one.
 func (c Config) Validate() error {
 	seen := make(map[string]bool, len(c.RestCall))
 	for _, e := range c.RestCall {
