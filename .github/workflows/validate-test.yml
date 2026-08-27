@@ -1,0 +1,46 @@
+# Reusable workflow — test gate (race detector unit tests).
+# Called by ci.yml. Job name must stay "test" — combined with the
+# caller job's "Validate / Test" name it produces the required
+# branch-protection check "Validate / Test / test".
+name: Validate Test
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Test (race detector)
+        run: make test-ci
+
+      - name: Build (compile-check)
+        run: make build

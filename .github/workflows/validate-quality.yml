@@ -1,0 +1,63 @@
+# Reusable workflow — quality gate (fmt, tidy, vet, lint, vuln-check).
+# Called by ci.yml. Job name must stay "quality" — combined with the
+# caller job's "Validate / Quality" name it produces the required
+# branch-protection check "Validate / Quality / quality".
+name: Validate Quality
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify modules
+        run: make mod-verify
+
+      - name: Format check
+        run: make fmt-check
+
+      - name: Tidy check
+        run: |
+          make tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint
+
+      - name: Vulnerability check
+        run: make vuln-check
