@@ -3,6 +3,14 @@ package connectors
 import (
 	"context"
 	"fmt"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/chatnotify"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/documentextract"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/restcall"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/sendemail"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/shared"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/sqlquery"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/storage"
 )
 
 type Connector interface {
@@ -19,14 +27,14 @@ func New(cfg Config) (map[string]Connector, error) {
 		return nil, fmt.Errorf("connectors: InternalToken is required (rest-call/sql-query attach it to every outbound request)")
 	}
 
-	docRefs := newDocRefStore()
+	docRefs := shared.NewDocRefStore()
 	built := []Connector{
-		newStorage(cfg, docRefs),
-		newSendEmail(cfg, docRefs),
-		newDocumentExtract(cfg),
-		newChatNotify(cfg),
-		newRestCall(cfg),
-		newSQLQuery(cfg),
+		storage.New(cfg.StorageProviders, docRefs),
+		sendemail.New(cfg.SendEmailProviders, docRefs),
+		documentextract.New(cfg.DocumentExtractClient),
+		chatnotify.New(cfg.ChatNotifyClient),
+		restcall.New(cfg.Aliases, cfg.HTTPClient, cfg.InternalToken),
+		sqlquery.New(cfg.Aliases, cfg.HTTPClient, cfg.InternalToken),
 	}
 
 	byType := make(map[string]Connector, len(built))

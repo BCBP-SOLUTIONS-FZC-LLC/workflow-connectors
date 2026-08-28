@@ -1,6 +1,7 @@
 package connectors_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,4 +41,24 @@ func TestNew_RequiresInternalToken(t *testing.T) {
 
 	_, err := connectors.New(connectors.Config{})
 	require.Error(t, err)
+}
+
+// execution_service's cmd/connector-worker calls connectors.WithDepartments
+// and reads it back via connectors.DepartmentsFromContext directly (not
+// through pkg/connectors/shared, which it doesn't import) — root must keep
+// forwarding to the same context key shared's own callers use.
+func TestWithDepartments_RoundTripsThroughDepartmentsFromContext(t *testing.T) {
+	t.Parallel()
+
+	ctx := connectors.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+	departments, ok := connectors.DepartmentsFromContext(ctx)
+	require.True(t, ok)
+	assert.Equal(t, []string{"dept-1:reviewer"}, departments)
+}
+
+func TestDepartmentsFromContext_NotSet_NotOK(t *testing.T) {
+	t.Parallel()
+
+	_, ok := connectors.DepartmentsFromContext(context.Background())
+	assert.False(t, ok)
 }

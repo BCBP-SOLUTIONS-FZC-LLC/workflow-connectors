@@ -4,6 +4,10 @@ import (
 	"net/http"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/aliasconfig"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/chatnotify"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/documentextract"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/sendemail"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/storage"
 )
 
 type Config struct {
@@ -11,16 +15,9 @@ type Config struct {
 	HTTPClient    *http.Client
 	InternalToken string
 
-	StorageProviders   map[string]StorageProviderConstructor
-	SendEmailProviders map[string]SendEmailProviderConstructor
+	StorageProviders   map[string]storage.ProviderConstructor
+	SendEmailProviders map[string]sendemail.ProviderConstructor
 
-	DocumentExtractClient DocumentExtractProviderClient
-	ChatNotifyClient      ChatNotifyProviderClient
-}
-
-func (c Config) httpClient() *http.Client {
-	if c.HTTPClient != nil {
-		return c.HTTPClient
-	}
-	return &http.Client{}
+	DocumentExtractClient documentextract.ProviderClient
+	ChatNotifyClient      chatnotify.ProviderClient
 }

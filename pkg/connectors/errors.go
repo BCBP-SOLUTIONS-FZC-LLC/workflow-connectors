@@ -1,11 +1,15 @@
 package connectors
 
-import "errors"
+import "github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/shared"
 
+// These re-export shared's sentinel errors under their long-standing root
+// names: execution_service's cmd/connector-worker checks errors.Is against
+// connectors.ErrValidation/ErrUpstream/ErrMissingInternalAuth directly, and
+// every connector-type subpackage needs the same values without importing
+// back into this package (that would recreate the cycle shared exists to
+// avoid), so shared is the single source of truth and root just points at it.
 var (
-	ErrValidation = errors.New("connectors: invalid input")
-
-	ErrMissingInternalAuth = errors.New("connectors: missing internal auth context (WithDepartments not called)")
-
-	ErrUpstream = errors.New("connectors: upstream call failed")
+	ErrValidation          = shared.ErrValidation
+	ErrMissingInternalAuth = shared.ErrMissingInternalAuth
+	ErrUpstream            = shared.ErrUpstream
 )
