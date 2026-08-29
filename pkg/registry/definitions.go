@@ -66,40 +66,6 @@ func sendEmailDefinition() Definition {
 	}
 }
 
-func documentExtractDefinition() Definition {
-	return Definition{
-		Type:        TypeDocumentExtract,
-		DisplayName: "Document Extract (OCR / structured extraction)",
-		Description: "Real-time-only document analysis: form fields, signatures, layout, or targeted queries.",
-		Inputs: []Field{
-			{Name: "accessKey", Kind: FieldKindSecretRef, Required: true, Description: "Author-supplied provider credential, resolved from its OpenBao secret path."},
-			{Name: "secretKey", Kind: FieldKindSecretRef, Required: true, Description: "Author-supplied provider credential, resolved from its OpenBao secret path."},
-			{Name: "region", Kind: FieldKindString},
-			{Name: "documentLocation", Kind: FieldKindEnum, Required: true, EnumValues: []string{"s3", "inline"}},
-			{Name: "documentBucket", Kind: FieldKindString, Condition: "only if documentLocation=s3"},
-			{Name: "documentName", Kind: FieldKindString, Condition: "only if documentLocation=s3"},
-			{Name: "documentVersion", Kind: FieldKindString, Condition: "only if documentLocation=s3"},
-			{Name: "documentRef", Kind: FieldKindDocRef, Condition: "only if documentLocation=inline"},
-			{Name: "analyzeForm", Kind: FieldKindBool},
-			{Name: "analyzeSignatures", Kind: FieldKindBool},
-			{Name: "analyzeLayout", Kind: FieldKindBool},
-			{Name: "analyzeQueries", Kind: FieldKindBool},
-			{Name: "query", Kind: FieldKindString, Condition: "only if analyzeQueries"},
-			{Name: "clientRequestToken", Kind: FieldKindString},
-			{Name: "jobTag", Kind: FieldKindString},
-			{Name: "kmsKeyId", Kind: FieldKindString},
-		},
-		Outputs: []Field{
-			{Name: "fields", Kind: FieldKindMap, Condition: "for analyzeForm"},
-			{Name: "rawText", Kind: FieldKindString, Description: "Full-text extraction."},
-			{Name: "signaturesDetected", Kind: FieldKindList, Condition: "for analyzeSignatures"},
-			{Name: "answers", Kind: FieldKindList, Condition: "for analyzeQueries"},
-			{Name: "confidence", Kind: FieldKindMap, Description: "Per-field confidence, keyed by field name."},
-		},
-		Retry: RetryPolicySafe,
-	}
-}
-
 func restCallDefinition() Definition {
 	return Definition{
 		Type:        TypeRestCall,
@@ -117,22 +83,6 @@ func restCallDefinition() Definition {
 			{Name: "body", Kind: FieldKindAny},
 		},
 		Retry: RetryPolicyConditional,
-	}
-}
-
-func sqlQueryDefinition() Definition {
-	return Definition{
-		Type:        TypeSQLQuery,
-		DisplayName: "SQL Query (internal platform databases only, read-only)",
-		Description: "Alias-based, read-only, never raw SQL — pre-registered named queries against this platform's own databases only.",
-		Inputs: []Field{
-			{Name: "queryAlias", Kind: FieldKindString, Required: true, Description: "A pre-registered named read-only query, resolved against cmd/connector-worker's own internal registry — never raw SQL."},
-			{Name: "params", Kind: FieldKindList, Description: "Bound as query parameters, never string-interpolated."},
-		},
-		Outputs: []Field{
-			{Name: "resultSet", Kind: FieldKindList, Description: "Row count bounded (a fixed cap) to keep context_json small."},
-		},
-		Retry: RetryPolicySafe,
 	}
 }
 

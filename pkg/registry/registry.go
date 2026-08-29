@@ -7,12 +7,18 @@ import (
 )
 
 const (
-	TypeStorage         = "storage"
-	TypeSendEmail       = "send-email"
+	TypeStorage    = "storage"
+	TypeSendEmail  = "send-email"
+	TypeRestCall   = "rest-call"
+	TypeChatNotify = "chat-notify"
+
+	// TypeDocumentExtract and TypeSQLQuery are disabled: neither has a
+	// definition in All() below, so neither is part of the active connector
+	// set. The consts stay because pkg/connectors/documentextract and
+	// pkg/connectors/sqlquery — kept intact but no longer wired into
+	// connectors.New() — still reference them for their own Type() methods.
 	TypeDocumentExtract = "document-extract"
-	TypeRestCall        = "rest-call"
 	TypeSQLQuery        = "sql-query"
-	TypeChatNotify      = "chat-notify"
 )
 
 type FieldKind string
@@ -75,9 +81,7 @@ func All() map[string]Definition {
 	defs := []Definition{
 		storageDefinition(),
 		sendEmailDefinition(),
-		documentExtractDefinition(),
 		restCallDefinition(),
-		sqlQueryDefinition(),
 		chatNotifyDefinition(),
 	}
 

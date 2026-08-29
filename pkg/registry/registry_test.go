@@ -9,18 +9,16 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-func TestAll_SixTypes(t *testing.T) {
+func TestAll_FourTypes(t *testing.T) {
 	t.Parallel()
 
 	defs := registry.All()
-	require.Len(t, defs, 6)
+	require.Len(t, defs, 4)
 
 	wantTypes := []string{
 		registry.TypeStorage,
 		registry.TypeSendEmail,
-		registry.TypeDocumentExtract,
 		registry.TypeRestCall,
-		registry.TypeSQLQuery,
 		registry.TypeChatNotify,
 	}
 	for _, want := range wantTypes {
@@ -40,9 +38,7 @@ func TestAll_RetryPolicies(t *testing.T) {
 	defs := registry.All()
 	assert.Equal(t, registry.RetryPolicySafe, defs[registry.TypeStorage].Retry)
 	assert.Equal(t, registry.RetryPolicyUnsafe, defs[registry.TypeSendEmail].Retry)
-	assert.Equal(t, registry.RetryPolicySafe, defs[registry.TypeDocumentExtract].Retry)
 	assert.Equal(t, registry.RetryPolicyConditional, defs[registry.TypeRestCall].Retry)
-	assert.Equal(t, registry.RetryPolicySafe, defs[registry.TypeSQLQuery].Retry)
 	assert.Equal(t, registry.RetryPolicyUnsafe, defs[registry.TypeChatNotify].Retry)
 }
 
@@ -116,20 +112,6 @@ func TestAll_FieldContents(t *testing.T) {
 		assert.Equal(t, registry.FieldKindTimestamp, fieldByName(t, out, "sentAt").Kind)
 	})
 
-	t.Run("document-extract", func(t *testing.T) {
-		t.Parallel()
-		in, out := defs[registry.TypeDocumentExtract].Inputs, defs[registry.TypeDocumentExtract].Outputs
-		assert.False(t, hasField(in, "provider"), "no real per-provider implementation exists yet")
-		assert.True(t, fieldByName(t, in, "accessKey").IsSecretRef())
-		assert.True(t, fieldByName(t, in, "secretKey").IsSecretRef())
-		loc := fieldByName(t, in, "documentLocation")
-		assert.Equal(t, registry.FieldKindEnum, loc.Kind)
-		assert.ElementsMatch(t, []string{"s3", "inline"}, loc.EnumValues)
-		assert.True(t, loc.Required)
-		assert.Equal(t, registry.FieldKindMap, fieldByName(t, out, "confidence").Kind)
-		assert.Equal(t, registry.FieldKindMap, fieldByName(t, out, "fields").Kind)
-	})
-
 	t.Run("rest-call", func(t *testing.T) {
 		t.Parallel()
 		in := defs[registry.TypeRestCall].Inputs
@@ -138,17 +120,6 @@ func TestAll_FieldContents(t *testing.T) {
 		assert.True(t, alias.Required)
 		for _, f := range in {
 			assert.False(t, f.IsSecretRef(), "rest-call has no per-tenant secret fields (%s)", f.Name)
-		}
-	})
-
-	t.Run("sql-query", func(t *testing.T) {
-		t.Parallel()
-		in := defs[registry.TypeSQLQuery].Inputs
-		alias := fieldByName(t, in, "queryAlias")
-		assert.Equal(t, registry.FieldKindString, alias.Kind)
-		assert.True(t, alias.Required)
-		for _, f := range in {
-			assert.False(t, f.IsSecretRef(), "sql-query has no per-tenant secret fields (%s)", f.Name)
 		}
 	})
 

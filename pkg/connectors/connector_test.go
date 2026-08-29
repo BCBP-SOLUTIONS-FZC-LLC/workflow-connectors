@@ -15,19 +15,17 @@ func validConfig() connectors.Config {
 	return connectors.Config{InternalToken: "test-token"}
 }
 
-func TestNew_SixTypes(t *testing.T) {
+func TestNew_FourTypes(t *testing.T) {
 	t.Parallel()
 
 	all, err := connectors.New(validConfig())
 	require.NoError(t, err)
-	require.Len(t, all, 6)
+	require.Len(t, all, 4)
 
 	for _, typ := range []string{
 		registry.TypeStorage,
 		registry.TypeSendEmail,
-		registry.TypeDocumentExtract,
 		registry.TypeRestCall,
-		registry.TypeSQLQuery,
 		registry.TypeChatNotify,
 	} {
 		c, ok := all[typ]
