@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- LLD rev 8.13 (docs only): a connector always uses the tenant's stored credential, read by the worker from `connectors/<tenant>/<type>/<field>`; a diagram never names one. The registry's secret-field descriptions still say "author-supplied" and are corrected with the next registry change.
+
 ### Added
 
 - `send-email` is real for all 4 providers (LLD §10 Decision #22): `sendgrid` (`sendgrid-go`), `aws-ses` (`aws-sdk-go-v2/service/sesv2`), `microsoft-365` (hand-rolled Graph `sendMail` REST call + `oauth2/clientcredentials`, not the official Kiota-generated SDK), `google-workspace` (`google.golang.org/api/gmail/v1`, domain-wide-delegation service account impersonating `senderEmail`). `Config.SendEmailClient` is replaced by `Config.SendEmailProviders map[string]SendEmailProviderConstructor`, mirroring `storage`'s per-call-construction-with-cache pattern exactly — `provider` is required, no default, and an unconfigured provider is `ErrValidation`, never a mock fallback. `microsoft-365`/`google-workspace` have no server-side template mechanism, so `body` is required for those two regardless of `templateId`. `attachments` entries (document refs) resolve to real bytes via a `docRefStore` now shared across `storage` and `send-email` (see Fixed below) — a filename is synthesized from the resolved content type since the field carries no per-attachment name of its own.
