@@ -46,14 +46,20 @@ jobs:
           }}" >> "$GITHUB_OUTPUT"
 
   validate-quality:
+    permissions:
+      contents: read
+      actions: write
     name: Validate / Quality
     needs: [ci-gate]
     if: needs.ci-gate.outputs.run == 'true'
     uses: ./.github/workflows/validate-quality.yml
 
   validate-test:
+    permissions:
+      contents: read
+      actions: write
     name: Validate / Test
-    needs: [ci-gate]
+    needs: [ci-gate, validate-quality, trivy-cve-scan]
     if: needs.ci-gate.outputs.run == 'true'
     uses: ./.github/workflows/validate-test.yml
 
@@ -81,6 +87,9 @@ jobs:
     if: needs.ci-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -109,6 +118,12 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
           cache-dir: .trivy-cache
+
+      - name: Cancel run on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
 
   # Placeholder: no genuine runtime/service surface exists in this repo to
   # smoke-test — it's a library consumed by execution_service's connector
@@ -164,4 +179,5 @@ jobs:
                 ...context.repo,
                 issue_number: context.issue.number,
                 body: markedBody,
-              }
+              });
+            }

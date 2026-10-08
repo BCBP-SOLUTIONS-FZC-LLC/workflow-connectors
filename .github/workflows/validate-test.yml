@@ -22,6 +22,9 @@ env:
 jobs:
   test:
     name: test
+    permissions:
+      contents: read
+      actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -44,3 +47,9 @@ jobs:
 
       - name: Build (compile-check)
         run: make build
+
+      - name: Cancel run on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
