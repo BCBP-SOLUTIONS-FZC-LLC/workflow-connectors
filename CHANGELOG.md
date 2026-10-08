@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `.editorconfig`, `.githooks/pre-commit` (`make setup` installs it), `release` and `changelog-check` workflows, CODEOWNERS, PR and issue templates, Dependabot.
+- `.editorconfig`, `.githooks/pre-commit` (`make setup` installs it), `release` and `changelog-check` workflows, CODEOWNERS, PR and issue templates.
 
 ### Fixed
 
