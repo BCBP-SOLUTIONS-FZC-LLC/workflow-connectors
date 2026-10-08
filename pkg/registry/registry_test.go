@@ -1,6 +1,7 @@
 package registry_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -148,4 +149,14 @@ func TestIsIdempotentMethod(t *testing.T) {
 	assert.False(t, registry.IsIdempotentMethod("POST"))
 	assert.False(t, registry.IsIdempotentMethod("PATCH"))
 	assert.False(t, registry.IsIdempotentMethod(""))
+}
+
+func TestSecretRefDescriptions_DoNotClaimAuthorSupplied(t *testing.T) {
+	for _, def := range registry.All() {
+		for _, f := range def.Inputs {
+			if f.IsSecretRef() {
+				assert.NotContains(t, strings.ToLower(f.Description), "author-supplied", "%s.%s", def.Type, f.Name)
+			}
+		}
+	}
 }

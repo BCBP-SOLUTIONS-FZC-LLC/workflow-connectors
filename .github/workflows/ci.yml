@@ -77,6 +77,8 @@ jobs:
 
   trivy-cve-scan:
     name: Trivy CVE scan
+    needs: [ci-gate]
+    if: needs.ci-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -144,9 +146,22 @@ jobs:
               ? '\n\n_CI gate closed — this PR is a draft or labeled `skip-ci`. Mark it ready for review (or remove the label) to run the full suite._'
               : '';
             const body = `### CI summary\n\n| Job | Result |\n| --- | --- |\n${rows}${skipNote}`;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+            const marker = '<!-- ci-pr-summary -->';
+            const markedBody = `${marker}\n${body}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
               issue_number: context.issue.number,
-              body,
             });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existing.id,
+                body: markedBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body: markedBody,
+              }

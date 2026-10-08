@@ -1,0 +1,9 @@
+# Default: every file requires review from the platform team.
+* @BCBP-SOLUTIONS-FZC-LLC/workflow
+
+# Workflow and release automation changes require explicit sign-off.
+.github/workflows/ @BCBP-SOLUTIONS-FZC-LLC/workflow
+.github/dependabot.yml @BCBP-SOLUTIONS-FZC-LLC/workflow
+
+# Public API surface — extra scrutiny.
+pkg/ @BCBP-SOLUTIONS-FZC-LLC/workflow

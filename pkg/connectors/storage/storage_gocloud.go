@@ -103,7 +103,7 @@ func openGCSBucket(ctx context.Context, bucketName string, params map[string]any
 		return nil, fmt.Errorf("%w: gcpServiceAccountKey is required for gcp-gcs", shared.ErrValidation)
 	}
 
-	creds, err := google.CredentialsFromJSON(ctx, []byte(serviceAccountKey), gcsScope)
+	creds, err := google.CredentialsFromJSONWithType(ctx, []byte(serviceAccountKey), google.ServiceAccount, gcsScope)
 	if err != nil {
 		return nil, fmt.Errorf("%w: gcp-gcs credentials: %s", shared.ErrUpstream, err)
 	}

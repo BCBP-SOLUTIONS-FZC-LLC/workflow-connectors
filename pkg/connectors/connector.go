@@ -16,17 +16,8 @@ type Connector interface {
 	Execute(ctx context.Context, input map[string]any) (map[string]any, error)
 }
 
-// New builds the four active registered connectors against cfg. It is
-// fallible: InternalToken is required for rest-call to attach to every
-// outbound request, so an unconfigured Config fails immediately rather than
-// at first dispatch.
-//
-// sql-query and document-extract are implemented in their own subpackages
-// but are deliberately not wired in here: sql-query has no evidence of
-// production use, and document-extract needs a real redesign (from its
-// current Textract-shaped multi-mode design to a simple LLM API call)
-// before it's worth activating. Both subpackages are left intact so either
-// can be re-added by restoring their entries here.
+// New builds the active connectors against cfg and fails when InternalToken is unset.
+// sql-query and document-extract stay out of the set until they are redesigned.
 func New(cfg Config) (map[string]Connector, error) {
 	if cfg.InternalToken == "" {
 		return nil, fmt.Errorf("connectors: InternalToken is required (rest-call attaches it to every outbound request)")

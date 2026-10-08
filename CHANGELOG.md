@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `gcp-gcs` accepts only a `service_account` key (`google.CredentialsFromJSONWithType`); a workload-identity or other credential type is refused instead of being read from the worker's filesystem.
+- `go.opentelemetry.io/otel/sdk` v1.45.0 and `google.golang.org/grpc` v1.83.1 (reachable `govulncheck` findings GO-2026-6505, GO-2026-6348).
+
+### Added
+
+- `.editorconfig`, `.githooks/pre-commit` (`make setup` installs it), `release` and `changelog-check` workflows, CODEOWNERS, PR and issue templates, Dependabot.
+
+### Fixed
+
+- The registry's secret-field descriptions no longer say "author-supplied": the credential is the tenant's stored one (LLD rev 8.13).
+- `make lint` and `make vuln-check` ran bare binaries missing on CI runners; they now run `go tool golangci-lint` and a pinned `govulncheck`. `make fmt-check` no longer rewrites files.
+
 ### Changed
 
-- LLD rev 8.13 (docs only): a connector always uses the tenant's stored credential, read by the worker from `connectors/<tenant>/<type>/<field>`; a diagram never names one. The registry's secret-field descriptions still say "author-supplied" and are corrected with the next registry change.
+- LLD rev 8.13 (docs only): a connector always uses the tenant's stored credential, read by the worker from `connectors/<tenant>/<type>/<field>`; a diagram never names one.
 
 ### Added
 

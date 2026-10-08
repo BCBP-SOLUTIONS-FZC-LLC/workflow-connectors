@@ -10,8 +10,8 @@ Shared library for the workflow engine's automatic connector-task feature. Full 
 
 ## v1 catalogue
 
-`storage`, `send-email`, `document-extract`, `rest-call`, `sql-query`, `chat-notify` — full field tables in `pkg/registry` and the LLD §6.4.
+`storage`, `send-email`, `rest-call` and `chat-notify` are active; field tables are in `pkg/registry` and the LLD §6.4. `sql-query` and `document-extract` are held back.
 
 ## Status
 
-All 6 `pkg/connectors` implementations are real. `rest-call` and `sql-query` dispatch to internal platform services over HTTP (an alias-resolved endpoint for `rest-call`, an owning service's own query-execution endpoint for `sql-query` — neither needs a third-party account). The other 4 (`storage`, `send-email`, `document-extract`, `chat-notify`) run against a small provider-client interface backed by an in-memory mock (`Config.StorageClient` etc.) until a real SDK is wired in — swapping one in later is a single-file, single-line-of-wiring change, no `Execute()` changes needed.
+Four connectors are active in `connectors.New`: `rest-call` (HTTP to an alias-resolved internal endpoint), `storage` (`aws-s3`, `azure-blob`, `gcp-gcs`, `google-drive`), `send-email` (`sendgrid`, `aws-ses`, `microsoft-365`, `google-workspace`) and `chat-notify`, which runs on an in-memory mock client until a real provider is wired in through `Config.ChatNotifyClient`. `sql-query` and `document-extract` are implemented in their subpackages but are neither wired into `connectors.New` nor listed in `registry.All()`.

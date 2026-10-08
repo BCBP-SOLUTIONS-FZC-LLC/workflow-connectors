@@ -12,11 +12,7 @@ const (
 	TypeRestCall   = "rest-call"
 	TypeChatNotify = "chat-notify"
 
-	// TypeDocumentExtract and TypeSQLQuery are disabled: neither has a
-	// definition in All() below, so neither is part of the active connector
-	// set. The consts stay because pkg/connectors/documentextract and
-	// pkg/connectors/sqlquery — kept intact but no longer wired into
-	// connectors.New() — still reference them for their own Type() methods.
+	// TypeDocumentExtract and TypeSQLQuery have no definition in All(): disabled.
 	TypeDocumentExtract = "document-extract"
 	TypeSQLQuery        = "sql-query"
 )

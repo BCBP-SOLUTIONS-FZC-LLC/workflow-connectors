@@ -14,4 +14,4 @@
 
 ## Status
 
-All 6 `pkg/connectors` implementations are real. `rest-call`/`sql-query` dispatch over HTTP, resolved against `pkg/connectors/aliasconfig`'s static registry. `storage`/`send-email`/`document-extract`/`chat-notify` run against an in-memory mock provider client by default (`Config.StorageClient` etc.) — real S3/SendGrid/Textract/Slack SDK integrations are separate, later work, tracked in `execution_service`'s own task board.
+Four connectors are active in `connectors.New`: `rest-call` (HTTP to an alias-resolved internal endpoint), `storage` (`aws-s3`, `azure-blob`, `gcp-gcs`, `google-drive`), `send-email` (`sendgrid`, `aws-ses`, `microsoft-365`, `google-workspace`) and `chat-notify`, which runs on an in-memory mock client until a real provider is wired in through `Config.ChatNotifyClient`. `sql-query` and `document-extract` are implemented in their subpackages but are neither wired into `connectors.New` nor listed in `registry.All()`.

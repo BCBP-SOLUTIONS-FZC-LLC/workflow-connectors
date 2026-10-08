@@ -1,0 +1,35 @@
+name: Changelog check
+
+"on":
+  pull_request:
+    paths:
+      - 'pkg/**'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  changelog:
+    name: changelog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: CHANGELOG updated in this PR
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --name-only "$BASE" "$HEAD" | grep -q '^CHANGELOG\.md$'; then
+            echo "CHANGELOG.md updated in this PR."
+          else
+            echo "::error file=CHANGELOG.md,title=CHANGELOG not updated::This PR changes pkg/ but does not update CHANGELOG.md. Add an entry under Unreleased."
+            exit 1
+          fi

@@ -90,3 +90,12 @@ func TestOpenGCSBucket_MissingCredentials_IsValidationError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrValidation))
 }
+
+func TestOpenGCSBucket_NonServiceAccountCredential_IsRejected(t *testing.T) {
+	externalAccount := `{"type":"external_account","audience":"//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/q","subject_token_type":"urn:ietf:params:oauth:token-type:jwt","token_url":"https://sts.googleapis.com/v1/token","credential_source":{"file":"/etc/passwd"}}`
+
+	_, err := openGCSBucket(context.Background(), "bucket", map[string]any{"gcpServiceAccountKey": externalAccount})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, shared.ErrUpstream))
+}
