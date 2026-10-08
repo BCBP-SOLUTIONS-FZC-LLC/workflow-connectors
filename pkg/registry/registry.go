@@ -12,7 +12,6 @@ const (
 	TypeRestCall   = "rest-call"
 	TypeChatNotify = "chat-notify"
 
-	// TypeDocumentExtract and TypeSQLQuery have no definition in All(): disabled.
 	TypeDocumentExtract = "document-extract"
 	TypeSQLQuery        = "sql-query"
 )
@@ -59,7 +58,6 @@ type Field struct {
 	Description string
 }
 
-// IsSecretRef reports whether f's value must be resolved from OpenBao
 func (f Field) IsSecretRef() bool {
 	return f.Kind == FieldKindSecretRef
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 )
 
-// containing "\r\n" could otherwise inject extra headers into the message.
 func stripCRLF(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
 }

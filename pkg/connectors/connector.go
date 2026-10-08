@@ -16,8 +16,6 @@ type Connector interface {
 	Execute(ctx context.Context, input map[string]any) (map[string]any, error)
 }
 
-// New builds the active connectors against cfg and fails when InternalToken is unset.
-// sql-query and document-extract stay out of the set until they are redesigned.
 func New(cfg Config) (map[string]Connector, error) {
 	if cfg.InternalToken == "" {
 		return nil, fmt.Errorf("connectors: InternalToken is required (rest-call attaches it to every outbound request)")

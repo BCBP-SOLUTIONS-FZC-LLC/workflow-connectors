@@ -13,10 +13,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-// Connector is deliberately structured like restcall.Connector, not a direct
-// database connection: an owning service's own internal query-execution
-// endpoint resolves queryId against its own pre-registered, read-only
-// statement and performs the actual parameter binding.
 type Connector struct {
 	aliases       aliasconfig.Config
 	httpClient    *http.Client

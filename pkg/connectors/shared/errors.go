@@ -1,4 +1,3 @@
-// Package shared holds what more than one connector uses, with no import back into the connector packages.
 package shared
 
 import "errors"

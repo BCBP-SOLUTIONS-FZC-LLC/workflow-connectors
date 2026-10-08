@@ -94,7 +94,6 @@ func (c *graphClient) Send(ctx context.Context, msg EmailMessage) (string, error
 	if err := c.api.sendMail(ctx, msg.SenderEmail, body); err != nil {
 		return "", err
 	}
-	// sendMail returns 202 Accepted with no body; Graph doesn't hand back a message ID synchronously.
 	return "", nil
 }
 

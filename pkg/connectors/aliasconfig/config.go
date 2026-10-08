@@ -1,8 +1,3 @@
-// Package aliasconfig defines the endpointAlias/queryAlias registry schema
-// (LLD workflow_connectors.md §6.4.4/§6.4.5). definition_service owns and
-// serves it; execution_service's cmd/connector-worker fetches and caches it.
-// rest-call/sql-query's Execute() implementations resolve against the same
-// Config shape everywhere, so the services that need it never drift.
 package aliasconfig
 
 import "time"

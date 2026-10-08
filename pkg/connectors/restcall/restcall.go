@@ -14,7 +14,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
 )
 
-// Connector dispatches to another platform service's own internal HTTP API.
 type Connector struct {
 	aliases       aliasconfig.Config
 	httpClient    *http.Client

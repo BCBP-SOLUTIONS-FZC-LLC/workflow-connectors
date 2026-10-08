@@ -92,7 +92,6 @@ func DecodeResponseBody(resp *http.Response) (any, error) {
 	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		var v any
 		if err := json.Unmarshal(raw, &v); err != nil {
-			// Mislabeled Content-Type shouldn't fail the whole call
 			return string(raw), nil
 		}
 		return v, nil
