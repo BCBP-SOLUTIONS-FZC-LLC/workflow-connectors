@@ -17,6 +17,7 @@ name: CI
     branches: [main]
   pull_request:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
 
 concurrency:
