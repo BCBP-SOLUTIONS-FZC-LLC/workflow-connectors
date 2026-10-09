@@ -7,12 +7,13 @@ import (
 )
 
 const (
-	TypeStorage         = "storage"
-	TypeSendEmail       = "send-email"
+	TypeStorage    = "storage"
+	TypeSendEmail  = "send-email"
+	TypeRestCall   = "rest-call"
+	TypeChatNotify = "chat-notify"
+
 	TypeDocumentExtract = "document-extract"
-	TypeRestCall        = "rest-call"
 	TypeSQLQuery        = "sql-query"
-	TypeChatNotify      = "chat-notify"
 )
 
 type FieldKind string
@@ -31,18 +32,26 @@ const (
 	FieldKindTimestamp FieldKind = "timestamp"
 )
 
+// RetryPolicy says which transient failures of a connector type may be
+// retried automatically. A permanent or unknown failure is never retried,
+// whatever the policy.
 type RetryPolicy string
 
 const (
-	RetryPolicySafe        RetryPolicy = "safe"
-	RetryPolicyUnsafe      RetryPolicy = "unsafe"
+	// RetryPolicySafe: every transient failure (storage).
+	RetryPolicySafe RetryPolicy = "safe"
+	// RetryPolicyUnsafe: never (chat-notify).
+	RetryPolicyUnsafe RetryPolicy = "unsafe"
+	// RetryPolicyConditional: transient failures of an idempotent HTTP
+	// method only (rest-call).
 	RetryPolicyConditional RetryPolicy = "conditional"
+	// RetryPolicyNotDelivered: transient failures the provider provably never
+	// accepted (send-email: DNS, connection refused, 429), so a retry cannot
+	// duplicate the message. A failure whose delivery is unknown is never
+	// retried.
+	RetryPolicyNotDelivered RetryPolicy = "not-delivered"
 )
 
-// IsIdempotentMethod resolves RetryPolicyConditional's per-call condition for
-// rest-call: retryable only when the resolved HTTP method is itself
-// idempotent. A dispatcher has no other signal to key off, since
-// Definition.Retry is one static value per connector type.
 func IsIdempotentMethod(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions, http.MethodTrace:
@@ -61,10 +70,6 @@ type Field struct {
 	Description string
 }
 
-// IsSecretRef reports whether f's value must be resolved from OpenBao rather
-// than carried inline — the one distinction every consumer that special-cases
-// credential fields needs, kept here so that check isn't hand-rolled per
-// caller.
 func (f Field) IsSecretRef() bool {
 	return f.Kind == FieldKindSecretRef
 }
@@ -82,12 +87,16 @@ func All() map[string]Definition {
 	defs := []Definition{
 		storageDefinition(),
 		sendEmailDefinition(),
-		documentExtractDefinition(),
 		restCallDefinition(),
-		sqlQueryDefinition(),
 		chatNotifyDefinition(),
 	}
 
+	return indexByType(defs)
+}
+
+// indexByType keys definitions by Type, panicking on a duplicate: two
+// definitions claiming one type is a programming error in All.
+func indexByType(defs []Definition) map[string]Definition {
 	byType := make(map[string]Definition, len(defs))
 	for _, d := range defs {
 		if _, exists := byType[d.Type]; exists {

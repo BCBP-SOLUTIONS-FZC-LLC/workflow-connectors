@@ -1,0 +1,124 @@
+# Local and CI infrastructure for workflow-connectors' integration tests.
+#
+# This module is a library, so there is no app service: the stack provides
+# what the library talks to in production —
+#
+#   postgres  Drive document registry (documents/sqlstore) and send intents
+#             (sendintent/sqlstore), each applied with its own ApplySchema.
+#             Migrations connect here directly (migrate.Runner's advisory
+#             lock needs a session).
+#   pgbouncer PgBouncer in transaction mode in front of postgres — how the
+#             platform's services reach the database; the stores are tested
+#             through it with pgcommon's PGBouncerMode.
+#   valkey    Document-reference metadata (docref/valkeystore), with the
+#             production persistence settings the store refuses to run
+#             without (valkeystore.CheckDurability).
+#   floci     S3 for document content (docref/s3content). The platform's
+#             AWS emulator (iam-user-profile and iam-org-membership use the
+#             same image); init-floci.sh creates the dev document bucket.
+#
+#   make docker-up           start and wait for every healthcheck
+#   make test / make test-ci all three suites (unit, postgres, integration);
+#                            test-postgres and test-integration run one each
+#   make docker-down         stop and delete the volumes
+#
+# Images are pinned by digest (tag kept for readability); bump both together.
+#
+# Host ports are chosen not to collide with the IAM services' stacks (which
+# use 5432-5434, 6379 and 4566-4569) and can be overridden from the
+# environment; the Makefile derives the TEST_* variables from the same values.
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: connectors
+    ports:
+      - "${WC_PG_PORT:-55432}:5432"
+    # The test suites open several direct pools at once (the store tests'
+    # shared pools, the isolated-schema pools, PgBouncer's server pool) when
+    # every package runs in parallel; the default of 100 is too few.
+    command: ["postgres", "-c", "max_connections=300"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d connectors"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: test
+      DB_NAME: connectors
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 10
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    ports:
+      - "${WC_PGBOUNCER_PORT:-55433}:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U postgres || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  valkey:
+    image: valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
+    # The settings docs/runbooks/document-refs.md requires for ref metadata:
+    # every write fsynced to the AOF, and memory pressure refusing writes
+    # instead of evicting live refs.
+    command:
+      - valkey-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - always
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "${WC_VALKEY_PORT:-56379}:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  floci:
+    image: floci/floci:2.1.0-compat@sha256:bb98b11f837bdacdda21ce6635a0773509e50aa471c35be9332a9efef502127c
+    ports:
+      - "${WC_FLOCI_PORT:-4580}:4566"
+    environment:
+      FLOCI_DEFAULT_REGION: us-east-1
+      FLOCI_DEFAULT_ACCOUNT_ID: "000000000000"
+    volumes:
+      - floci_data:/app/data
+      - ./scripts/init-floci.sh:/etc/floci/init/ready.d/init-floci.sh:ro
+    healthcheck:
+      # Checks the last thing init-floci.sh creates (the lifecycle rule), not
+      # just S3 reachability, so "healthy" means the bucket is ready.
+      test: ["CMD", "aws", "--region", "us-east-1", "s3api", "get-bucket-lifecycle-configuration",
+             "--bucket", "workflow-connectors-documents"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 2s
+
+volumes:
+  postgres_data:
+  valkey_data:
+  floci_data:

@@ -1,0 +1,27 @@
+graph LR
+    subgraph sources["Documentation sources"]
+        mmd["docs/architecture/mermaid/\n7 × .mmd source diagrams"]
+        arch["ARCHITECTURE.md\nembeds mermaid blocks + prose"]
+        readme["README.md\ncatalogue · usage · CI · versioning"]
+        lld["docs/lld/workflow-connectors-library-lld.md\nLLD — Part I module · Part II system design"]
+        lint[".go-arch-lint.yml\nexecutable form of the dependency rules"]
+        changelog["CHANGELOG.md · VERSIONING.md"]
+    end
+
+    subgraph rendered["Rendered by"]
+        github["GitHub\nMarkdown + Mermaid preview"]
+        ide["IDE\nMermaid Preview plugin"]
+        live["mermaid.live\nonline renderer"]
+        pkgsite["make godoc\npkgsite at localhost:8080"]
+        ci["CI\nArchitecture lint step"]
+    end
+
+    mmd  -->|"embedded as\nfenced blocks"| arch
+    arch --> github & ide
+    mmd  --> live & ide
+    readme --> github
+    lld --> github
+    changelog --> github
+    lint --> ci
+    arch -.->|"describes"| lint
+    readme -.->|"Go doc"| pkgsite

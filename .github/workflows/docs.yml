@@ -1,0 +1,59 @@
+# Checks for documentation changes (same structure as platform-pgcommon's
+# docs.yml). ci.yml skips its build/test jobs when a change touches only
+# documentation (any *.md, docs/architecture/*.mmd; see detect-changes.sh),
+# so the architecture-diagram check runs here instead:
+#
+#   - diagram-sync: every docs/architecture/mermaid/*.mmd is embedded
+#     verbatim in ARCHITECTURE.md, every mermaid block there has a source,
+#     and no sequence diagram contains ';' (scripts/docs_check.py,
+#     `make docs-check`).
+#
+# Mixed code + docs changes are also checked by validate-quality.yml (make
+# docs-check). This workflow is not a required check, so the `paths` filter
+# cannot block a merge.
+name: Docs
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - 'ARCHITECTURE.md'
+      - 'docs/architecture/**'
+      - 'scripts/docs_check.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ARCHITECTURE.md'
+      - 'docs/architecture/**'
+      - 'scripts/docs_check.py'
+      - '.github/workflows/docs.yml'
+
+permissions:
+  contents: read
+
+# On a PR, a newer push supersedes the older run (cancelled). On main every
+# push gets its own group (keyed by the commit), so every push is checked.
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  diagram-sync:
+    name: Architecture diagram sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+          persist-credentials: false
+
+      # The script directly, not `make docs-check`: the Makefile evaluates
+      # `go list` at parse time, and this job sets up no Go toolchain.
+      - name: Diagrams embedded verbatim in ARCHITECTURE.md
+        run: python3 scripts/docs_check.py

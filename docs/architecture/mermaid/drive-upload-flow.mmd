@@ -1,0 +1,34 @@
+sequenceDiagram
+    participant W1 as Upload A (worker call)
+    participant W2 as Upload B (same tenant + provider + folder + filename)
+    participant DB as connector_documents (PostgreSQL)
+    participant D as Google Drive
+
+    Note over DB: UNIQUE (tenant_id, provider, container, filename)<br/>is the only uniqueness authority — Drive is never listed to decide it
+
+    W1 ->>+ DB: Claim: INSERT … ON CONFLICT DO UPDATE … WHERE state IN (AVAILABLE, FAILED) OR lease expired RETURNING
+    DB -->>- W1: new row PENDING_UPLOAD, owner = A, lease = now() + 15 min
+    W2 ->>+ DB: Claim: the same single upsert
+    DB -->> W2: no row (conflict, and the WHERE fails — A holds a live lease)
+    W2 ->> DB: Get(identity)
+    DB -->>- W2: A's row, unclaimed
+    W2 -->> W2: InProgressError{documentID} (retryable, never touches Drive)
+
+    W1 ->> DB: Advance → UPLOADING (WHERE owner = A AND lease live)
+    alt row records a Drive file ID
+        W1 ->> D: update(fileID)
+    else a crashed attempt left a file tagged connectorDocumentId = id
+        W1 ->> D: update(adopted fileID)
+    else an untagged file of the same name was placed in the folder by hand
+        W1 ->> D: update(oldest untagged fileID) + tag connectorDocumentId = id
+    else
+        W1 ->> D: create(name = filename as metadata, appProperties.connectorDocumentId = id)
+    end
+    D -->> W1: fileID
+
+    alt Drive succeeded
+        W1 ->> DB: Complete → AVAILABLE, object_id = fileID, owner = NULL<br/>+ audit row (one transaction)
+    else Drive failed
+        W1 ->> DB: Fail → FAILED, last_error, failed_attempts + 1, owner = NULL<br/>+ audit row (one transaction)
+    end
+    Note over W1,DB: a later upload claims an AVAILABLE or FAILED row by CAS<br/>and replaces the same Drive file in place

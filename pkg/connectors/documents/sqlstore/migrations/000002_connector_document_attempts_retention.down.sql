@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_connector_document_attempts_finished_at;

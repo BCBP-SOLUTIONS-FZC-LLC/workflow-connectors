@@ -1,0 +1,265 @@
+# Release for https://github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors
+# Triggered by version tags (e.g. v2.0.0 or v2.1.0-rc.1).
+#
+# Same structure as platform-pgcommon's release.yml — the same gates as
+# ci.yml, run at the tagged commit, with a release front (tag + CHANGELOG
+# verification) and a release back (GitHub Release) — scoped to a library:
+#
+#   verify ──┬─► validate-test ──► sbom ──────┐
+#            ├─► validate-quality ────────────┤──► publish
+#            └─► api-compat ──────────────────┘
+#
+# verify: the tag points at the checked-out HEAD, is on origin/main, and its
+# major version matches the module path's /vN suffix; a workflow_dispatch was
+# started from main or from the tag itself; CHANGELOG.md has a section for the
+# version (a prerelease may use its base version's) — verify-release-tag.sh,
+# verify-changelog-entry.sh.
+# api-compat: blocking here — a non-major release whose exported API changed
+# incompatibly since the previous stable tag fails (ci.yml only warns).
+# sbom: Trivy filesystem scan of go.mod/go.sum (CRITICAL/HIGH/UNKNOWN fail the
+# release) + CycloneDX SBOM.
+# publish: release notes from CHANGELOG, the source archive, checksums.txt
+# over the archive and the SBOM, Cosign keyless-signed (sign-blob; bundle
+# checksums.txt.sigstore.json), then the GitHub Release.
+#
+# Library module — no Docker image, binaries or deploy gate: consumers pin
+# the tag through the Go module proxy. The signer identity is
+# release.yml@refs/tags/vX.Y.Z (or @refs/heads/main for a dispatch from main).
+#
+# Third-party actions are pinned by commit SHA (`# vX.Y.Z`).
+name: Release
+
+"on":
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v2.0.0)'
+        required: true
+
+permissions:
+  contents: read
+
+# Keyed by the TAG being released, not github.ref: a tag push (ref = the tag)
+# and a workflow_dispatch for the same tag (ref = main or the tag, tag in the
+# input) share one group, so two runs of one release never overlap.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ github.event.inputs.tag || github.ref }}
+
+jobs:
+  # ── fail fast: a wrong tag or a missing CHANGELOG section stops everything
+  verify:
+    name: Verify tag + CHANGELOG
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          # Every branch and tag: the tag must be reachable from origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      # Dispatch ref (main or the tag), HEAD carries the tag, tag on
+      # origin/main, major version matches the /vN module path.
+      - name: Verify release tag
+        run: bash .github/scripts/verify-release-tag.sh
+
+      - name: Verify CHANGELOG entry exists
+        run: bash .github/scripts/verify-changelog-entry.sh
+
+  # ── same as ci.yml ────────────────────────────────────────────────────────
+  validate-test:
+    name: Validate / Test
+    needs: verify
+    uses: ./.github/workflows/validate-test.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+    # Only the secrets validate-test.yml declares (no `secrets: inherit`).
+    secrets:
+      GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+      CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
+
+  # ── same as ci.yml ────────────────────────────────────────────────────────
+  validate-quality:
+    name: Validate / Quality
+    needs: verify
+    uses: ./.github/workflows/validate-quality.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+    secrets:
+      GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+      CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
+
+  # ── release-only gate: no incompatible exported-API change in a non-major
+  # release (apidiff vs the highest stable tag below this one).
+  api-compat:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    needs: verify
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # apidiff loads both trees' packages, so private modules must resolve.
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: No incompatible API change unless the major version bumps
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: make api-compat API_NEW_VERSION="${RELEASE_TAG}"
+
+  # ── gates on validate-test: dependency CVE scan + SBOM ───────────────────
+  sbom:
+    name: CVE scan + SBOM
+    runs-on: ubuntu-latest
+    needs: [verify, validate-test]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Cache Trivy DB
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/trivy-cache
+          key: trivy-db-${{ runner.os }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      # Critical/High findings fail the release — a known-vulnerable module
+      # must not be tagged as a release that consuming services will pin.
+      - name: Scan dependencies for CVEs
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # tools/go.mod holds golangci-lint, a development tool: its
+          # dependencies are not shipped and must not gate a release or
+          # appear in the SBOM.
+          skip-dirs: tools
+          format: sarif
+          output: trivy-results.sarif
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH,UNKNOWN
+          exit-code: '1'
+          cache-dir: /tmp/trivy-cache
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+
+      # CycloneDX SBOM — full dependency inventory for compliance / audit.
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # tools/go.mod holds golangci-lint, a development tool: its
+          # dependencies are not shipped and must not gate a release or
+          # appear in the SBOM.
+          skip-dirs: tools
+          format: cyclonedx
+          output: sbom.cyclonedx.json
+          exit-code: '0'
+          cache-dir: /tmp/trivy-cache
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ env.RELEASE_TAG }}
+          path: sbom.cyclonedx.json
+          retention-days: 90
+
+  # ── release-only: the GitHub Release consuming services see ──────────────
+  publish:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [verify, validate-test, validate-quality, api-compat, sbom]
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write   # Cosign keyless sign-blob of checksums.txt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Extract release notes from CHANGELOG
+        run: bash .github/scripts/extract-release-notes.sh
+
+      - name: Download SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom-${{ env.RELEASE_TAG }}
+
+      # Source archive (the tree the module proxy serves for the tag) and
+      # checksums.txt over it and the SBOM.
+      - name: Source archive + checksums
+        run: bash .github/scripts/release-checksums.sh
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Signed after every gate has passed; the bundle (certificate,
+      # signature, Rekor entry) ships as a release asset.
+      - name: Sign checksums with Cosign
+        run: cosign sign-blob --yes --bundle checksums.txt.sigstore.json checksums.txt
+
+      - name: Verify checksums signature
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          cosign verify-blob \
+            --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "^https://github\.com/${REPO}/\.github/workflows/release\.yml@refs/(tags/v.+|heads/main)$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/create-github-release.sh

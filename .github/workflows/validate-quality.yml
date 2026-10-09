@@ -1,0 +1,160 @@
+# Reusable workflow — quality gate.
+# fmt · tidy · vet · lint (golangci-lint) · arch-lint · docs-check ·
+# CI-script tests · vuln-check · supply-chain checks (SHA-pinned actions).
+# Called by ci.yml and release.yml. Job name must stay "quality" — combined
+# with the caller job's "Validate / Quality" name it produces the required
+# branch-protection check "Validate / Quality / quality".
+name: Validate / Quality
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+      skip:
+        description: >-
+          Skip the job (ci.yml: documentation-only change, draft PR or the
+          skip-ci label). Skipped here, not at the caller, so the required
+          check "<workflow> / <job>" still reports (a skipped job counts as
+          success for branch protection).
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      # The only secrets this workflow reads. Callers pass them explicitly —
+      # no `secrets: inherit`, so PR test code never runs with other secrets
+      # in scope.
+      GO_PRIVATE_TOKEN:
+        description: 'Read access to the private BCBP Go modules (platform-pgcommon)'
+        required: false
+      CI_REPO_READ_TOKEN:
+        description: 'Checkout of a private repository (github.token is the fallback)'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  quality:
+    name: quality
+    if: ${{ !inputs.skip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
+            go.mod
+
+      # Store credentials so go mod download can fetch private BCBP modules
+      # (platform-pgcommon). Mirrors iam-org-membership and platform-events
+      # (secrets.GO_PRIVATE_TOKEN, an org-level secret).
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: go mod download
+
+      - name: Verify modules
+        run: make mod-verify
+
+      # Workflow files must use literal operators, not HTML entity encodings.
+      - name: Reject HTML-escaped operators in workflow files
+        run: |
+          if grep -REn '&(gt|lt|amp);' .github/workflows/ .github/scripts/; then
+            echo "::error::Workflow or script files contain HTML entities. Use literal operators instead."
+            exit 1
+          fi
+
+      # Third-party actions run with this repository's token and secrets, and a
+      # tag can be moved to different code; a full commit SHA cannot. Pin as
+      # owner/action@<40-hex-sha> # vX.Y.Z (local ./ workflows are exempt).
+      - name: Require actions pinned to a commit SHA
+        run: |
+          unpinned=$(grep -REn '^[[:space:]]*(-[[:space:]]*)?uses:' .github/workflows/ \
+            | grep -Ev 'uses:[[:space:]]*\./' \
+            | grep -Ev '@[0-9a-f]{40}([[:space:]]|$)' || true)
+          if [ -n "${unpinned}" ]; then
+            echo "${unpinned}" | while IFS= read -r line; do
+              echo "::error file=${line%%:*},title=Unpinned action::${line#*:}"
+            done
+            echo "::error::Pin every action to a full commit SHA with a version comment, e.g. actions/checkout@<sha> # v7.0.1"
+            exit 1
+          fi
+
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "${unformatted}" ]; then
+            echo "${unformatted}" | while IFS= read -r f; do
+              echo "::error file=${f},title=Format check::Not formatted — run 'make fmt'"
+            done
+            exit 1
+          fi
+
+      # Both modules: the library's go.mod and tools/go.mod (golangci-lint).
+      - name: Tidy check
+        run: |
+          if ! make tidy-check; then
+            echo "::error file=go.mod,title=Module drift::go.mod or tools/go.mod is not tidy — run 'make tidy' and commit the result."
+            exit 1
+          fi
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint
+
+      # Enforces the core/adapter dependency rules in .go-arch-lint.yml:
+      # registry and shared import nothing, connector cores never import a
+      # cloud SDK, and only provider adapters may.
+      - name: Cache go-arch-lint binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/bin/go-arch-lint
+          key: go-arch-lint-${{ runner.os }}-v1.15.0
+
+      - name: Architecture lint
+        run: make arch-lint
+
+      # ARCHITECTURE.md embeds each docs/architecture/mermaid/*.mmd diagram
+      # verbatim; a diagram edited in one place only fails here.
+      - name: Architecture diagrams in sync
+        run: make docs-check
+
+      # Regression tests for the CI scripts: detect-changes.sh's docs-only
+      # decision (renames, moves, deletions, spaces, '::' paths) and its log
+      # sanitising. A wrong docs-only verdict would skip every required check.
+      - name: CI script tests
+        run: make ci-scripts-test
+
+      - name: Vulnerability check
+        run: |
+          if ! make vuln-check; then
+            echo "::error file=go.mod,title=Vulnerability found::govulncheck detected vulnerabilities — run 'make vuln-check' locally to view details."
+            exit 1
+          fi

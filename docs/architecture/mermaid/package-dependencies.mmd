@@ -1,0 +1,77 @@
+graph LR
+    connectors(["pkg/connectors\n(connectors)"])
+
+    gocloud(["storage/gocloud"])
+    googledrive(["storage/googledrive"])
+    ses(["sendemail/ses"])
+    sendgrid(["sendemail/sendgrid"])
+    msgraph(["sendemail/msgraph"])
+    gmail(["sendemail/gmail"])
+
+    storage(["storage"])
+    sendemail(["sendemail"])
+    chatnotify(["chatnotify"])
+    restcall(["restcall"])
+    sqlquery(["sqlquery"])
+    documentextract(["documentextract"])
+
+    aliasconfig(["aliasconfig"])
+    documents(["documents"])
+    docref(["docref"])
+    docrefvk(["docref/valkeystore"])
+    docrefs3(["docref/s3content"])
+    sqlstore(["documents/sqlstore"])
+    sendintent(["sendintent"])
+    intentsql(["sendintent/sqlstore"])
+    shared(["shared"])
+    registry(["pkg/registry"])
+
+    connectors --> storage
+    connectors --> sendemail
+    connectors --> chatnotify
+    connectors --> restcall
+    connectors --> aliasconfig
+    connectors --> shared
+    connectors --> registry
+
+    gocloud     --> storage
+    gocloud     --> shared
+    googledrive --> storage
+    googledrive --> shared
+    googledrive --> documents
+    documents   --> shared
+    sqlstore    --> documents
+    sqlstore    --> shared
+    intentsql   --> sendintent
+    intentsql   --> shared
+    sendintent  --> shared
+    connectors  --> sendintent
+    sendemail   --> sendintent
+    storage     --> docref
+    sendemail   --> docref
+    connectors  --> docref
+    docrefvk    --> docref
+    docrefs3    --> docref
+    ses         --> sendemail
+    ses         --> shared
+    sendgrid    --> sendemail
+    sendgrid    --> shared
+    msgraph     --> sendemail
+    msgraph     --> shared
+    gmail       --> sendemail
+    gmail       --> shared
+
+    storage         --> registry
+    storage         --> shared
+    sendemail       --> registry
+    sendemail       --> shared
+    chatnotify      --> registry
+    chatnotify      --> shared
+    restcall        --> registry
+    restcall        --> shared
+    restcall        --> aliasconfig
+    sqlquery        --> registry
+    sqlquery        --> shared
+    sqlquery        --> aliasconfig
+    documentextract --> registry
+    documentextract --> shared

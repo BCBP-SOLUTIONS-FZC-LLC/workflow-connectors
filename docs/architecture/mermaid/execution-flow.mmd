@@ -1,0 +1,46 @@
+sequenceDiagram
+    participant W as connector-worker (execution_service)
+    participant OB as OpenBao
+    participant F as connectors map (from New)
+    participant C as storage.Connector (core)
+    participant Cache as client cache (in-process)
+    participant A as gocloud adapter (NewProvider)
+    participant P as Object store (S3 / Azure / GCS)
+
+    Note over W: WorkflowTaskCreated with connector_type=storage<br/>input = IOMapping-resolved fields from the plan
+
+    W ->>+ OB: read connectors/{tenant}/storage/{field} for every secret_ref field
+    OB -->>- W: accessKey · secretKey (in memory only, §6.2)
+
+    W ->>+ F: byType["storage"].Execute(ctx, input)
+    F ->>+ C: Execute(ctx, input)
+    Note over C: bucket + key required → else ErrValidation<br/>provider required, must be in Config.StorageProviders → else ErrValidation
+
+    C ->>+ Cache: sha256(provider · bucket · every credential field)
+    alt cached client
+        Cache -->> C: ProviderClient
+    else miss
+        Cache -->> C: none
+        C ->>+ A: ctor(ctx, input)
+        Note over A: missing credentials → error<br/>(core: shared.Classify keeps ErrValidation, anything else ErrUpstream)
+        A -->>- C: ProviderClient (gocloudStorageClient)
+        C ->> Cache: store (LRU: at 256 the least recently used is retired, closed after its last release)
+    end
+    deactivate Cache
+
+    alt operation = fetch
+        C ->>+ A: Fetch(bucket, key)
+        A ->>+ P: NewReader(key)
+        P -->>- A: bytes + content type
+        A -->>- C: content, contentType
+        Note over C: createDocument=true → docref.Service.Create (object to S3, then metadata to Valkey)<br/>otherwise return content inline
+    else operation = upload
+        Note over C: content may be a doc ref → docref.Service.Read (Valkey metadata → S3 object, size + SHA-256 verified)
+        C ->> A: Upload(bucket, key, bytes, contentType)
+    else operation = delete
+        C ->> A: Delete(bucket, key)
+    end
+
+    C -->>- F: map[string]any (top-level keys only, Decision 13)
+    F -->>- W: output, or error wrapping ErrValidation / ErrUpstream
+    Note over W: success → POST /internal/connector-tasks/:id/complete<br/>failure → retry only if connectors.DecideRetry allows (transient + type policy), else /fail

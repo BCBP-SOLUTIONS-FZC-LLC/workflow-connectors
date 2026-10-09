@@ -1,0 +1,143 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code when working with **workflow-connectors**, the Go library that implements the workflow engine's connector tasks (Tender Management SaaS platform, Workflow subsystem). Detailed reference lives in the sibling files listed under [See Also](#see-also). This file is what must always be in context.
+
+## What This Repo Is
+
+`workflow-connectors` is a **private Go library** (module `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`, `go 1.26.9`, platform-pgcommon **v2.0.1**). It is consumed as a module dependency and **never deployed**: there is no binary, image, Dockerfile or runtime configuration. It has two consumers:
+
+- **`execution_service`'s `cmd/connector-worker`** (run side) imports `pkg/connectors` and its provider adapters, builds the connectors with `connectors.New(connectors.Config{…})`, and calls `Execute` per task. It is the composition root: it owns the pgcommon pool, the go-redis client, the S3 client, OpenBao secret resolution, retries and metrics. Wiring guide: [`docs/integration/connector-worker.md`](../docs/integration/connector-worker.md).
+- **`workflow-definition-service`** (compile side) imports only `pkg/registry` (connector types, input/output field tables, retry policies), which must stay dependency-free.
+
+**Key responsibilities (the library is the sole implementation of):**
+- **Connector execution** — four connectors built by `connectors.New`: `storage` (fetch / upload / delete on `aws-s3`, `azure-blob`, `gcp-gcs`, `google-drive`), `send-email` (`sendgrid`, `aws-ses`, `microsoft-365`, `google-workspace`), `rest-call` (alias-only calls to internal platform services) and `chat-notify` (provider client injected; nil means every call fails with `ErrValidation`). `sql-query` and `document-extract` are implemented in `pkg/connectors/sqlquery` and `pkg/connectors/documentextract` but **not wired** into `New` or `registry.All()`.
+- **Error classification and the retry decision** — every error is transient, permanent or unknown (`connectors.ClassOf`); `connectors.DecideRetry(type, err, method)` combines the class with the type's `registry.RetryPolicy`. The library itself **never retries**.
+- **Document refs** (`docref`) — `docref:<uuid>` handles that let one task hand a document to another. Content in the platform's S3 bucket (`docref/s3content`), metadata only in Valkey (`docref/valkeystore`), size + SHA-256 verified on every resolution, 24 h TTL.
+- **Drive uniqueness** (`documents`, `documents/sqlstore`) — a PostgreSQL row per tenant + provider + folder + filename decides which call may write a Drive file (owner + lease compare-and-set).
+- **send-email duplicate-request protection** (`sendintent`, `sendintent/sqlstore`) — one intent per tenant + `messageKey`; explicit resend by `resendAttempt` CAS. **Not idempotency**: send-email is at-most-once when not retried, never exactly-once.
+- **Two embedded migration sets** applied by `ApplySchema` through pgcommon's `migrate.Runner`, each with its own tracking table.
+
+**Does NOT own:** reading tenant credentials (the worker resolves every `secret_ref` field from OpenBao and passes the value in `Execute`'s input); configuration or environment variables (the library reads none); connection pools, Valkey or S3 clients (passed in); retry loops, backoff, rate limiting, metrics and logging (the worker's job, driven by `DecideRetry` and `RetryDecision.LogAttrs()`); the alias host allowlist (enforced where aliases are written, in the definition service); workflow state, history and secrets storage.
+
+## Common Commands
+
+```bash
+make setup             # .env-example → .env (if missing), go mod download, install .githooks/pre-commit
+make tidy              # go mod tidy in BOTH modules (root + tools/)
+make tidy-check        # fail if either go.mod/go.sum is not tidy (CI, pre-commit)
+make fmt / fmt-check   # gofmt -w / verify (mirrors CI)
+make vet / make lint   # default build + a second pass with every test build tag (ALL_TEST_TAGS = integration)
+make arch-lint         # go-arch-lint against .go-arch-lint.yml (.github/scripts/arch-lint.sh, same as CI)
+make docs-check        # ARCHITECTURE.md mermaid blocks identical to docs/architecture/mermaid/*.mmd (same as CI)
+make ci-scripts-test   # detect-changes.sh regression tests (scratch git repos; same as CI)
+make api-compat        # apidiff vs the last stable tag (warns); API_NEW_VERSION=vX.Y.Z fails unless compatible or a major bump
+make test-unit         # ./test/unit/... + ./pkg/... (white-box), no Docker
+make test-postgres     # docker-up, then ./test/postgres/... + ./pkg/connectors/storage/googledrive/... with -tags=integration
+make test-integration  # docker-up, then ./test/integration/... with -tags=integration (Valkey, floci S3, PostgreSQL)
+make test              # docker-up, then the three suites in parallel (-j3), -v, no race/coverage
+make test-ci           # docker-up, three suites with -race + per-suite coverage in .coverage/, merged into coverage.out (CI)
+make race              # docker-up, the three suites with -race (the test-ci internals, without the merge)
+make cover / cover-func  # test-ci, then the HTML report / per-function summary
+make build             # go build ./... (compile check; there is nothing to ship)
+make ci                # tidy-check + fmt-check + vet + lint + arch-lint + docs-check + ci-scripts-test + test-ci + build
+make docker-up / docker-down   # docker-compose.yml stack (postgres, pgbouncer, valkey, floci); down deletes the volumes
+make mod-verify / vuln-check (govulncheck v1.1.4 on ./pkg/...) / godoc (pkgsite on :8080) / install-hooks / clean
+```
+
+There is **no** coverage-gate Make target: the gate is `.github/scripts/coverage-gate.sh` (CI runs it after `make test-ci`; locally `COVERAGE_THRESHOLD=98 GITHUB_OUTPUT=/dev/null bash .github/scripts/coverage-gate.sh`).
+
+To run a single test (one module; `test/` is **not** a separate module):
+```bash
+# unit (no Docker)
+go test ./test/unit/connectors/ -run TestRetry_S3NoSuchKey_IsPermanent -v
+go test ./test/unit/ -run TestRetryMatrix -v
+go test ./pkg/connectors/docref/valkeystore/ -run TestEvaluate_Rules -v          # white-box
+
+# postgres / integration: build tag + TEST_* env + the compose stack
+make docker-up
+set -a; source .env; set +a      # .env-example lists TEST_POSTGRES_DSN, TEST_PGBOUNCER_DSN, TEST_VALKEY_ADDR, TEST_S3_ENDPOINT, TEST_VALKEY_DOCKER
+go test -tags=integration ./test/postgres/documents/ -run TestStore_ConcurrentClaimsOnNewIdentity_ExactlyOneWinner -v
+go test -tags=integration ./test/postgres/ -run TestPG02_DocumentRegistry_ThroughPgBouncer -v
+go test -tags=integration ./test/integration/ -run TestIT01_InvoiceWorkflow_AcrossReplicas_RetriesThrottledSend -v
+go test -tags=integration ./pkg/connectors/storage/googledrive/ -run TestDrive_TwoSimultaneousUploads_OneWinsOneGetsInProgress -v
+```
+
+Without a `TEST_*` variable the infrastructure tests **skip**; with `CI` set they **fail** instead (GitHub Actions sets `CI=true`). Without `-tags=integration` the googledrive white-box tests run their in-memory leg only (`stores_memory_test.go`, `//go:build !integration`).
+
+**Module note:** two modules — the root (library and every test) and `tools/` (golangci-lint, run as `go tool -modfile=tools/go.mod golangci-lint`), so the linter's dependencies never enter consumers' module graphs. Always `make tidy` (both). `stretchr/testify` is a root `require` because the tests live in the root module.
+
+**Coverage note:** gate **98%** (`COVERAGE_THRESHOLD: '98'` in `validate-test.yml`; a ratchet — raise, never lower). Current total **99.96%** (2,309 of 2,310 statements; `go tool cover -func` rounds it to `100.0%`). The three suites write `.coverage/{unit,postgres,integration}.out` with `-coverpkg` = every `./pkg/...` package (`COVER_PKG_LIST`), and `scripts/merge_coverage.py` merges them (max count per block) into `coverage.out`. The single uncovered statement is the send-email total-attachment guard in `resolveAttachments` (`pkg/connectors/sendemail/sendemail.go`), kept as defence in depth.
+
+## Architecture
+
+Core / adapter split enforced by **go-arch-lint** (`.go-arch-lint.yml`, `depOnAnyVendor: false`, so every third-party import is granted per component): `registry` and `shared` import nothing (no `deps` entry); `aliasconfig` only `yaml`; the connector cores (`storage`, `sendemail`, `chatnotify`, `restcall`, `sqlquery`, `documentextract`) may use `registry`, `shared`, `aliasconfig`, `send_intents`, `docref` and `uuid` — **never a cloud SDK**; only `provider_adapters` (`storage/gocloud`, `storage/googledrive`, `sendemail/{ses,sendgrid,msgraph,gmail}`) may import AWS / Azure / gocloud / Google / oauth2 / SendGrid; `docref/valkeystore` alone gets go-redis, `docref/s3content` alone the AWS SDK; only the two `sqlstore` packages get platform-pgcommon; the `connectors` facade never imports an adapter (the worker injects them through `Config`). **golangci `depguard` rule `pgcommon-only`** (`.golangci.yml`, tests included) denies `github.com/jackc/pgx`, `database/sql` and `github.com/lib/pq`: all database access uses pgcommon's types (`pgcommon.Pool`, `Conn`, `Row`, `Tx`, `TxOptions`, `ErrNoRows`, `RunInTx`, `pgcommon/migrate`). Package layout, runtime dependencies, rules and consumer integration: **[`.claude/architecture.md`](architecture.md)**. Narrative with diagrams: [`ARCHITECTURE.md`](../ARCHITECTURE.md).
+
+## Key Files to Know
+
+- **`pkg/connectors/connector.go`** — `Connector` interface (`Type()`, `Execute(ctx, map[string]any) (map[string]any, error)`), `New(Config)`: fails without `InternalToken`; builds storage, send-email, chat-notify, rest-call; `indexByType` panics on a duplicate type. **`config.go`** — `Config` (`Aliases`, `HTTPClient`, `InternalToken`, `StorageProviders`, `SendEmailProviders`, `ChatNotifyClient`, `SendIntents`, `DocRefs`). **`errors.go`** — re-exported sentinels and class helpers. **`retry.go`** — `RetryDecision`, `DecideRetry`, `AutoRetryAllowed`. **`internalauth.go`** — `WithTenant` / `WithDepartments` re-exports.
+- **`pkg/registry/registry.go`** + **`definitions.go`** — `Type*` constants (six, including `TypeDocumentExtract` / `TypeSQLQuery`), `FieldKind*`, `RetryPolicy` (`safe` storage, `not-delivered` send-email, `conditional` rest-call, `unsafe` chat-notify), `IsIdempotentMethod` (GET/HEAD/PUT/DELETE/OPTIONS/TRACE), `All()` (**four** definitions). The field tables are the contract the definition service compiles against — confirm changes against LLD §S6.4.
+- **`pkg/connectors/shared/classify.go`** — `Class` (`ClassUnknown` = 0, `ClassTransient`, `ClassPermanent`), `ClassifiedError`, `Classifier`, `WithClass` / `Transient` / `Permanent`, `ClassOf` (precedence: `ErrValidation` → permanent "invalid input"; `ErrMissingInternalAuth` / `ErrMissingTenant` → permanent "missing call context"; then the outermost `Classifier`; else unknown "unclassified"), `ClassifyHTTPStatus` (408/425/429/500/502/503/504 transient; 3xx and other 4xx permanent; other 5xx unknown), `apiErrorCodes` (AWS codes), `ClassifyCause` (ErrorCode ▸ HTTPStatusCode ▸ network: deadline/DNS/refused/reset transient, `context.Canceled` unknown), `ClassifyByCause`. **There is deliberately no per-class `errors.Is` sentinel** (`ErrTransient` / `ErrPermanent` were removed in v2): read classes only with `ClassOf` / `IsTransient` / `IsPermanent` / `DecideRetry`.
+- **`pkg/connectors/shared/errors.go`** — `ErrValidation`, `ErrMissingInternalAuth`, `ErrUpstream`, `Classify(op, err)` (keeps `ErrValidation` as is; otherwise `ErrUpstream` + `ClassifyByCause`). `ErrUpstream` alone does **not** mean retryable. **`delivery.go`** — `ErrNotDelivered`, `ErrDeliveryUnknown`. **`tenant.go`** — `ErrMissingTenant`, `WithTenant`. **`internalauth.go`** — departments context, `DepartmentsHeaderValue` (empty list, or an entry empty / containing `,` CR LF → `ErrMissingInternalAuth`).
+- **`pkg/connectors/shared/limits.go`** — `MaxObjectBytes` 50 MiB, `MaxInlineBytes` 1 MiB, `MaxResponseBytes` 10 MiB, `MaxAttachmentBytes` 25 MiB, `DefaultHTTPTimeout` 30 s, `ProviderHTTPTimeout` 2 min, `ErrTooLarge` / `TooLarge` / `ReadAllLimited`, `InternalHTTPClient` (copy of the caller's client, never follows redirects, HTTP/1.1 only — a nil client or `*http.Transport` is cloned with HTTP/2 off; any other `RoundTripper` is used as-is; **no client-wide timeout** on the nil default, each call bounded by `CallTimeout`), `ProviderHTTPClient` (own transport, 2-min timeout, no redirects, HTTP/1.1 only: Go's HTTP/2 client can replay a body after a `PROTOCOL_ERROR` reset → duplicate emails).
+- **`pkg/connectors/shared/httphelpers.go`** — `RenderPathTemplate` (path segment values `url.PathEscape`d and never `""`/`.`/`..`; after `?` query-escaped), `NewInternalRequest` (request URL must keep the alias `baseURL`'s scheme and host, no userinfo), `ApplyQueryParams` (a key the template already sets is `ErrValidation`), `FlattenHeaders` (drops `Set-Cookie`), `DecodeResponseBody` / `DecodeErrorResponseBody` (never fails; returns `truncated`) / `DecodeBody` / `DecodeJSON` (`json.Number`, exactly one value), `FormatParam`. **`clientcache.go`** — `ClientCache[C]` (ref-counted handles, LRU eviction at the limit, a retired client closed via `io.Closer` once its last handle is released; `Client()` panics after `Release`). **`googlekey.go`** — `ValidateGoogleServiceAccountKey` (SSRF guard: `type` service_account, `token_uri` only Google's, `universe_domain` googleapis.com).
+- **`pkg/connectors/storage/storage.go`** — `ProviderClient` (`Fetch(ctx, bucket, key, maxBytes)`, `Upload`, `Delete`), `ProviderConstructor`, `New(providers, docRefs)`, `ResetClients`. Client cache key = SHA-256 of provider + bucket + every credential field (limit 256). Inline fetch reads at most 1 MiB (over → `ErrValidation` "set createDocument"); non-UTF-8 inline content is base64 with `contentEncoding`. A ref is created only with `createDocument: true`; upload from a `docref:` content resolves and verifies it first. `classifyRef`: resolution failures → `ErrValidation`; `docref.ErrUnavailable` → transient.
+- **`pkg/connectors/sendemail/sendemail.go`** — `Execute` order: validate (single bare addresses via `net/mail`; `templateId` or `body`; body required for `microsoft-365` / `google-workspace`) → `resolveAttachments` (refs, 25 MiB total budget) → `reserveIntent` (only with `messageKey`; needs `Config.SendIntents` and a tenant; random reservation token; on a Reserve error `recoverReservation` reads the row back) → `clientFor` → `checkProviderAttachmentLimit` (`AttachmentLimiter`) → `ctx.Err()` → `Send` → `finish` (always sets `deliveryOutcome`; records the outcome on the intent detached from cancellation, bounded by `recordTimeout` 10 s; a failed record sets `sendIntentWarning` and marks `SendError.IntentUnrecorded`). A duplicate of an **accepted** intent returns success with `duplicate: true`; any other duplicate is `*sendintent.DuplicateRequestError`. Cache key covers `senderEmail`.
+- **`pkg/connectors/sendemail/outcome.go`** — delivery semantics, `Outcome`, `SendError` (`Is` matches only `ErrNotDelivered` or `ErrDeliveryUnknown`; `Unwrap` returns a **declassified** view hiding every `Classifier` and class sentinel in the cause, so `ErrorClass` is the only class), `TraceWrites` / `WriteTracker` / `ClassifyAfterSend` (any byte written → unknown), `ClassifyStatus` (4xx not delivered, else unknown), `ClassifyTransport`, `classifySend` (unclassified → unknown), `OutcomeOf`.
+- **`pkg/connectors/docref/{docref,service,memory}.go`** — `Ref`, `Store` / `ContentStore` ports, sentinels, `Service` (`Create` writes S3 first then metadata, deletes the object on a failed metadata write with a 10 s detached cleanup; `Lookup` checks tenant, ID shape, exact `<prefix><tenant>/<uuid>` key, bucket, size, checksum; `Open` streams through `verifyingReader`; `Read(…, maxBytes)`; `Delete` ref first then object). `validTenant` (≤ 255 bytes, UTF-8, no `/` `\` control chars or dot segments). `NewMemoryService` is for unit tests only.
+- **`pkg/connectors/docref/valkeystore/valkeystore.go`** — `putScript` (create-only Lua; identical existing hash → idempotent `{2}`; server `TIME` timestamps; `PEXPIREAT`), script + `WAITAOF 1 <WaitReplicas>` sent as **one pipeline on the key's node** (WAITAOF confirms only its own connection's writes), `transient` replies → `docref.ErrUnavailable` (cluster topology replies reload the slot map), reads and deletes on the key's master. `WaitAOFTimeout` clamped 250 ms under the client read timeout. **`durability.go`** — `CheckDurability` (WAITAOF probe, then `appendonly yes`, `appendfsync always|everysec`, `maxmemory-policy noeviction`; every master and replica of a cluster).
+- **`pkg/connectors/docref/s3content/s3content.go`** — `New(client, bucket)`, `Check(ctx, keyPrefix)` (HeadBucket + probe that a missing key reads as `NoSuchKey`), `isNotFound` (**`NoSuchKey` only**; a missing bucket is not a missing document).
+- **`pkg/connectors/documents/documents.go`** + **`documents/sqlstore/sqlstore.go`** — state machine, `Store` port, `InProgressError` (transient, matches `ErrUploadInProgress` and `shared.ErrUpstream`), `DefaultLease` 15 min. SQL store: `Claim` is **one** `INSERT … ON CONFLICT ON CONSTRAINT uq_connector_documents_identity DO UPDATE … WHERE` (retried up to 3 times if the busy row vanished), transitions are owner + live-lease conditional statements, `finish` writes the audit row in the same transaction, `PruneAttempts`, `classify` (pgcommon SQLSTATE helpers → transient; `IsPoolClosed` → unknown). **Every statement runs inside `pgcommon.RunInTx`** so `PG_STATEMENT_TIMEOUT` / `PG_LOCK_TIMEOUT` apply (never `Pool.WithConn` for store statements).
+- **`pkg/connectors/sendintent/sendintent.go`** + **`sendintent/sqlstore/sqlstore.go`** — `Status`, `StalePendingAfter` 15 min, `Intent`, `Store` (`Reserve(ctx, tenant, key, resendFrom, token)`, `Get`, `Record(ctx, id, attempt, …)`), `DuplicateRequestError` (matches `ErrDuplicateRequest` and `shared.ErrValidation`), `ErrStaleRecord`. SQL `Reserve` is one upsert whose `WHERE` re-reserves only after `not_delivered`, or for `resendFrom` = current `attempts` when not pending or pending-and-stale.
+- **`pkg/connectors/storage/googledrive/googledrive.go`** — `NewProvider(docs documents.Store)`; upload/delete: claim → advance → Drive work under `leaseDeadline` (lease − 1 min from just before the claim) → complete/remove on a detached 10 s context; failures `release` the row (Fail). `write` order: recorded file ▸ oldest file tagged `appProperties.connectorDocumentId` ▸ oldest **untagged** same-name file (adopted) ▸ create; other tagged files removed. Drive is never the uniqueness authority.
+- **`pkg/connectors/aliasconfig/`** — `Config` / `Endpoint` / `Query`, `Load` (YAML + `Validate`), `IsValidMethod`, `ResolveEndpoint` / `ResolveQuery`, `ErrUnknownAlias`.
+- **Canonical tests:** `test/unit/retry_matrix_test.go` (every type × error kind × method), `test/unit/worker_scenarios_test.go` (`TestWorker_*`), `test/unit/regression_test.go` (`TestREG01_…` to `TestREG10_…`), `test/postgres/postgres_test.go` (`TestPG01`–`TestPG03`), `test/integration/workflow_scenarios_test.go` (`TestIT01_…` onward), `test/integration/multireplica/docref_multireplica_test.go` (`TestMultiReplica_*`), `test/integration/valkeystore/acl_replay_test.go` (`TestACL_DocumentedRulesSuffice`). See [`operations.md`](operations.md) § Testing.
+
+## Data Model
+
+Three tables in the **worker's** PostgreSQL database, created by this library's embedded migrations: `connector_documents` (Drive document registry, unique on tenant + provider + container + filename), `connector_document_attempts` (audit, no FK, pruned by `PruneAttempts`) and `connector_send_intents` (unique on tenant + `message_key`, with `reservation_token`). Tracked separately in `connector_documents_migrations` and `connector_send_intents_migrations` so their versions never collide with the service's own. In Valkey, one hash per ref at `docref:<uuid>` with nine metadata fields and a TTL; in S3, one object per ref at `<prefix><tenant>/<uuid>`. Full DDL, constraints and key layouts: **[`.claude/database-schema.md`](database-schema.md)**.
+
+## Public API
+
+`pkg/registry`, `pkg/connectors` (facade: `Config`, `New`, `Connector`, sentinels, `ErrorClass` + `ClassOf` / `IsTransient` / `IsPermanent` / `IsRetryable`, `DecideRetry` / `RetryDecision` / `AutoRetryAllowed`, `WithTenant` / `WithDepartments`), the connector cores and their `ProviderClient` ports and mocks, the six provider adapters (`NewProvider`), `aliasconfig`, `docref` (+ `s3content`, `valkeystore`), `documents` (+ `sqlstore`), `sendintent` (+ `sqlstore`) and `shared`. Everything under `pkg/` is public API under SemVer (`shared` included: its helpers changed in v2 as breaking changes). Full catalogue: **[`.claude/api-reference.md`](api-reference.md)**.
+
+## Runtime Flows & Concurrency
+
+Storage fetch / upload / `createDocument`, Drive claim / lease / adopt / delete, send-email with intents, attachments and outcome classification, rest-call, document-ref create / resolve, the retry decision, and the concurrency guarantees (client cache, unique constraints, CAS, create-only Lua, WAITAOF): **[`.claude/request-flows.md`](request-flows.md)**.
+
+## Operations
+
+Security (credential handling, SSRF guards, no redirects, HTTP/1.1 only, tenant scoping), what the worker configures (the library reads no environment), CI/CD and release (`.github/workflows`, `.github/scripts`), testing strategy (`test/` tree, build tag, compose stack, `CI=true`), runbooks and the degradation matrix: **[`.claude/operations.md`](operations.md)**.
+
+## Extending the Library
+
+- **New connector type:** add the `Type*` constant and a `Definition` (fields, `Retry` policy) in `pkg/registry` and list it in `All()`; implement the core in its own `pkg/connectors/<type>` package (input validation, `ProviderClient` port, `shared.Classify` on every provider error, a mock for tests); add it to `.go-arch-lint.yml`'s `connector_core`; build it in `connectors.New` (and any `Config` field); make sure `DecideRetry` has a rule for its policy (`test/unit/retry_matrix_test.go`'s `TestRetryMatrix_CoversEveryRegistryType` checks every registry type). A new type is a MINOR bump.
+- **New provider adapter:** a package under the core (`storage/<name>` or `sendemail/<name>`) exporting `NewProvider` with the core's `ProviderConstructor` shape; add it to `provider_adapters` and grant its SDK as a new `vendors` entry in `.go-arch-lint.yml`. Build HTTP clients from `shared.ProviderHTTPClient()` (no redirects, HTTP/1.1, own transport) and implement `Close()`; build cloud clients from the tenant's input only (never the worker's environment); validate any tenant value that ends up in a URL or token endpoint (`shared.ValidateGoogleServiceAccountKey`, Azure / Entra patterns). Attach a class to every error (`shared.WithClass` / `ClassifyCause`); a send-email adapter must use `sendemail.TraceWrites` + `ClassifyAfterSend` / `ClassifyStatus`, disable SDK retries, and implement `AttachmentLimiter` when its limit is below 25 MiB. Add every credential field to the core's cache-key list (`credentialFieldNames` / `emailCredentialFieldNames`) and the provider to the registry enum.
+- **New migration:** add the next-numbered `.up.sql` / `.down.sql` pair under `pkg/connectors/{documents,sendintent}/sqlstore/migrations/` (embedded by `//go:embed migrations/*.sql`); idempotent DDL (`IF NOT EXISTS`); never edit an applied version. Migrations run over a **direct** connection (advisory lock), never PgBouncer. CODEOWNERS adds the platform team for both directories. Cover it in `test/postgres` (`TestPG01_SchemasApplyConcurrentlyAndIdempotently`).
+- **New error class / mapping:** attach the class where the provider error is understood (adapter or store `classify`), never add an `errors.Is` sentinel per class. Update `docs/runbooks/retry-semantics.md` and `test/unit/retry_matrix_test.go`.
+- **Database access:** only through platform-pgcommon (`depguard` `pgcommon-only` + arch-lint); every store statement in `pgcommon.RunInTx`.
+- **Docs:** the diagrams live in `docs/architecture/mermaid/*.mmd` and are embedded **verbatim** as the ```mermaid blocks of `ARCHITECTURE.md` (index: `docs/architecture/README.md`). Edit the `.mmd` and the matching block together; `make docs-check` (`scripts/docs_check.py`, also in `make ci` and CI's validate-quality) fails on any drift, and on a `;` in a sequence diagram (Mermaid treats it as a statement separator). Render-check a changed diagram with `docker run --rm -v "$PWD/docs/architecture/mermaid:/data" minlag/mermaid-cli:11.4.2 -i /data/<name>.mmd -o /tmp/out.svg`. Keep the LLD, README, runbooks and `docs/integration/connector-worker.md` in step with behaviour changes, and add a CHANGELOG `[Unreleased]` entry.
+
+## Versioning
+
+**v1.0.0** (2026-10-09) is the released version (module path without `/v2`). **v2.0.0 is unreleased**: `CHANGELOG.md` `[Unreleased]` holds it, and the module path is already `…/workflow-connectors/v2` (consumers change imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`). Breaking changes in v2 include: the `/v2` module path; `ErrTransient` / `ErrPermanent` removed (use `ClassOf` / `DecideRetry`); `ErrUpstream` alone no longer retryable; send-email failures are `ErrNotDelivered` / `ErrDeliveryUnknown`, never `ErrUpstream`; send-email retry policy `not-delivered` (was `unsafe`); `sendintent.Store.Reserve(…, resendFrom int, token string)`, `Get`, `Record(…, attempt, …)`; `resend: true` requires `resendAttempt`; a duplicate of an accepted email succeeds; document refs via `*docref.Service` (S3 + Valkey; `shared.DocRefStore` removed); `storage.ProviderClient.Fetch` takes `maxBytes`; upload creates a ref only with `createDocument: true`; provider adapters moved to subpackages (`gocloud.NewProvider`, `googledrive.NewProvider(store)`, `ses` / `sendgrid` / `msgraph` / `gmail.NewProvider`); `connectors.WithTenant` required for refs, Drive and intents; JSON numbers decoded as `json.Number`; `shared.ApplyQueryParams` returns an error. `.github/scripts/verify-release-tag.sh` refuses a tag whose major does not match the `/vN` suffix. Bump rules and the release process: `VERSIONING.md`.
+
+## Dependency Updates
+
+Dependabot is disabled (`.github/dependabot.yml.disabled`; rename it back to re-enable). Update manually: `go get -u -t ./... && go mod tidy` in the root, then `make tidy-check` (both modules). For `tools/`, change the linter only with `cd tools && go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@<version>`, never a blanket `go get -u` (it would push the linter's transitive dependencies past its own pins), then `make tidy`. Private modules (platform-pgcommon) resolve via SSH with `GOPRIVATE` / `GONOSUMDB` = `github.com/BCBP-SOLUTIONS-FZC-LLC/*` (the Makefile exports them; CI uses the `GO_PRIVATE_TOKEN` secret). The `go` directive also sets the consumers' minimum Go; run `make vuln-check` after any toolchain or dependency bump and note it under `### Security` in the changelog.
+
+## See Also
+
+Detailed reference docs in `.claude/`:
+- [`architecture.md`](architecture.md) — package layout, runtime dependencies, dependency rules, consumer integration
+- [`api-reference.md`](api-reference.md) — public API per package, sentinels and classes, ports and adapters
+- [`database-schema.md`](database-schema.md) — PostgreSQL tables and migrations, Valkey hash schema, S3 key layout
+- [`request-flows.md`](request-flows.md) — per-connector flows, document refs, Drive registry, send intents, retry decision, concurrency
+- [`operations.md`](operations.md) — security, configuration, CI/CD and release, testing strategy, runbooks, degradation matrix
+
+Supplementary docs in the repo:
+- **`README.md`** — consumer onboarding, API overview, validation rules, integration guide, local development
+- **`ARCHITECTURE.md`** — architecture narrative with diagrams (`docs/architecture/mermaid/*.mmd`), threat model, invariants
+- **`docs/lld/workflow-connectors-library-lld.md`** — the module LLD (Part I) and the connector design (Part II, §S1–§S11)
+- **`docs/integration/connector-worker.md`** — wiring guide for `execution_service`'s connector worker, with a compiling skeleton
+- **`docs/runbooks/`** — `document-refs.md`, `email-delivery.md`, `retry-semantics.md`
+- **`SECURITY.md`**, **`VERSIONING.md`**, **`CONTRIBUTING.md`**, **`CHANGELOG.md`**

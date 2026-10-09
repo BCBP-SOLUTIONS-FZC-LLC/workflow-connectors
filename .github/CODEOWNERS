@@ -1,0 +1,24 @@
+# Default: every file requires review from the platform team.
+* @BCBP-SOLUTIONS-FZC-LLC/workflow
+
+# Workflow and release automation changes require explicit sign-off.
+.github/workflows/ @BCBP-SOLUTIONS-FZC-LLC/workflow
+.github/scripts/ @BCBP-SOLUTIONS-FZC-LLC/workflow
+.github/dependabot.yml @BCBP-SOLUTIONS-FZC-LLC/workflow
+
+# Public API surface — extra scrutiny.
+pkg/ @BCBP-SOLUTIONS-FZC-LLC/workflow
+
+# Registry contract — connector types, fields, error classes and retry rules
+# read by both workflow-definition-service and execution-service.
+pkg/registry/ @BCBP-SOLUTIONS-FZC-LLC/workflow
+
+# Database migrations run in every consuming deployment and are irreversible
+# in production.
+pkg/connectors/documents/sqlstore/migrations/ @BCBP-SOLUTIONS-FZC-LLC/workflow @BCBP-SOLUTIONS-FZC-LLC/platform-team
+pkg/connectors/sendintent/sqlstore/migrations/ @BCBP-SOLUTIONS-FZC-LLC/workflow @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# Architecture rules and lint configuration — loosening them weakens every
+# later review.
+.go-arch-lint.yml @BCBP-SOLUTIONS-FZC-LLC/workflow
+.golangci.yml @BCBP-SOLUTIONS-FZC-LLC/workflow

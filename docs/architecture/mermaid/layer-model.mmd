@@ -1,0 +1,47 @@
+graph TD
+    subgraph root["Composition Root  —  outside this module: execution_service cmd/connector-worker"]
+        worker["connector-worker\nloads alias registry from definition_service at startup (aliasconfig.Config)\nmaps provider name → adapter constructor (storage / send-email)\nresolves secret_ref fields from OpenBao just before Execute (§6.2)\nconnectors.WithDepartments(ctx, x-departments) for rest-call / sql-query\ncalls connectors.New(Config) once, then byType[type].Execute(ctx, input)"]
+    end
+
+    subgraph facade["Facade  —  pkg/connectors"]
+        new["connector.go · config.go\nConnector interface { Type(); Execute(ctx, input) }\nNew(Config) → map[type]Connector (storage · send-email · chat-notify · rest-call)\nInternalToken required — New fails without it\nConfig.DocRefs (docref.Service: S3 content + Valkey metadata) shared by storage + send-email\nConfig.SendIntents (sendintent.Store) for send-email messageKey\nretry.go: DecideRetry · RetryDecision\nerrors.go · internalauth.go re-export shared's sentinels, error classes + tenant/departments context helpers"]
+    end
+
+    subgraph adapters["Provider Adapters  —  pkg/connectors/{connector}/{provider}/  (the only place a cloud SDK is imported)"]
+        st_ad["storage/gocloud — aws-s3 · azure-blob · gcp-gcs via gocloud.dev/blob\nstorage/googledrive — google-drive via drive/v3 (Shared Drive-aware),\n  uploads owned through the document registry"]
+        em_ad["sendemail/ses — aws-sdk-go-v2 sesv2\nsendemail/sendgrid — sendgrid-go\nsendemail/msgraph — hand-rolled Graph sendMail + oauth2/clientcredentials\nsendemail/gmail — gmail/v1 + domain-wide delegation, raw MIME (CR/LF-stripped headers)"]
+    end
+
+    subgraph core["Connector Core  —  pkg/connectors/{connector}/  (no cloud SDKs)"]
+        storage["storage/\nProviderClient port · ProviderConstructor\nfetch / upload / delete · per-credential client cache (256)\nMockStorageClient"]
+        sendemail["sendemail/\nProviderClient port · EmailMessage · EmailAttachment\ntemplateless-provider rule · attachments via *docref.Service\nper-sender client cache (256) · MockSendEmailClient"]
+        chatnotify["chatnotify/\nProviderClient port · nil client → every call ErrValidation (no real provider yet)"]
+        restcall["restcall/\nalias → internal endpoint · x-internal-token + x-departments"]
+        sqlquery["sqlquery/  (not wired into New)\nalias → owning service's query endpoint, never SQL text"]
+        docextract["documentextract/  (not wired into New)\nProviderClient port · nil client → ErrValidation"]
+    end
+
+    subgraph support["Support  —  leaves"]
+        aliasconfig["aliasconfig/\nConfig · Endpoint · Query · Load · Validate · Resolve*"]
+        shared["shared/\nErrValidation · ErrUpstream · ErrMissingInternalAuth · ErrMissingTenant\nErrNotDelivered · ErrDeliveryUnknown · error classes (ClassOf)\nfield helpers · header names · departments/tenant ctx · ClientCache"]
+        docref["docref/\nService (Create · Lookup · Open · Read · Delete) · Store + ContentStore ports · memory stores (tests)\ndocref/s3content — S3 content (system of record) · docref/valkeystore — Valkey metadata + CheckDurability"]
+        documents["documents/\nStore port · PENDING_UPLOAD → UPLOADING → AVAILABLE | FAILED · MemoryStore\ndocuments/sqlstore — PostgreSQL store on platform-pgcommon v2 (worker's *pgcommon.Pool) + ApplySchema"]
+        sendintent["sendintent/\nStore port (Reserve · Record · Get) · MemoryStore · DuplicateRequestError\nsendintent/sqlstore — PostgreSQL store on platform-pgcommon v2 + ApplySchema"]
+        registry["pkg/registry\nType* · FieldKind* · RetryPolicy · Definition · Field · All()\nimported alone by definition_service"]
+    end
+
+    worker --> new
+    worker --> st_ad
+    worker --> em_ad
+    new --> core
+    st_ad --> storage
+    st_ad --> documents
+    storage --> docref
+    sendemail --> docref
+    sendemail --> sendintent
+    worker --> sendintent
+    worker --> documents
+    em_ad --> sendemail
+    core --> support
+    restcall --> aliasconfig
+    sqlquery --> aliasconfig
