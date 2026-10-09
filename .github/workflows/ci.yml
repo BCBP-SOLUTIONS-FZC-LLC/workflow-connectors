@@ -1,15 +1,34 @@
 # CI for https://github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors
-
+#
+# Parallel flow:
+#
+#   ci-gate ──┬─► validate-test ──► trivy ──┐
+#             └─► validate-quality ─────────┤──► pr-summary (PR events only)
+#   build-image-cache · lint-dockerfile ·   │
+#   smoke-tests (no-op placeholders) ───────┘
+#
+# validate-test runs the race+coverage gate and gates trivy (correctness).
+# validate-quality runs fmt/tidy/vet/lint/govulncheck in parallel.
+# trivy scans go.mod/go.sum (filesystem scan — no image), uploads SARIF to
+# the Security tab, and publishes a CycloneDX SBOM artifact.
+# pr-summary posts a status table on pull_request events.
+#
 # "Build image (cache)", "Lint Dockerfile", and "Smoke tests" are no-op
 # placeholders — they always succeed and exist only so the org branch-
 # protection ruleset resolves. This repo is a pure Go connectors library: no
-# Dockerfile, no deployable image, no runtime to smoke-test. Request an
-# exemption for Dockerfile-less repos from org admins when possible; until
-# then, these three stay as documented no-ops.
-
+# Dockerfile, no deployable image, no runtime to smoke-test (so there is no
+# image push/Cosign job either). Request an exemption for Dockerfile-less
+# repos from org admins when possible; until then, these three stay as
+# documented no-ops.
+#
 # ci-gate: lets a draft PR (or a PR labeled "skip-ci") skip the expensive
 # jobs below while iterating — never applies on push (a merge to main),
 # since github.event.pull_request.* only exists on pull_request events.
+#
+# Every push and pull request runs the full pipeline, including docs-only
+# changes: a workflow-level paths-ignore would skip the whole run, so the
+# required checks ("Validate / Test / test" and the rest) would never report
+# and a docs-only pull request could not merge.
 name: CI
 
 "on":
@@ -17,15 +36,14 @@ name: CI
     branches: [main]
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-permissions:
-  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -46,23 +64,21 @@ jobs:
              !contains(github.event.pull_request.labels.*.name, 'skip-ci'))
           }}" >> "$GITHUB_OUTPUT"
 
+  # ── runs in parallel with validate-quality ───────────────────────────────
+  validate-test:
+    name: Validate / Test
+    needs: [ci-gate]
+    if: needs.ci-gate.outputs.run == 'true'
+    uses: ./.github/workflows/validate-test.yml
+    secrets: inherit
+
+  # ── runs in parallel with validate-test ──────────────────────────────────
   validate-quality:
-    permissions:
-      contents: read
-      actions: write
     name: Validate / Quality
     needs: [ci-gate]
     if: needs.ci-gate.outputs.run == 'true'
     uses: ./.github/workflows/validate-quality.yml
-
-  validate-test:
-    permissions:
-      contents: read
-      actions: write
-    name: Validate / Test
-    needs: [ci-gate, validate-quality, trivy-cve-scan]
-    if: needs.ci-gate.outputs.run == 'true'
-    uses: ./.github/workflows/validate-test.yml
+    secrets: inherit
 
   # Placeholder: no Dockerfile exists in this repo. See header comment.
   build-image-cache:
@@ -82,50 +98,6 @@ jobs:
       - name: No-op placeholder
         run: echo "workflow-connectors has no Dockerfile — placeholder to satisfy the org branch-protection ruleset. Request a Dockerfile-less-repo exemption when possible."
 
-  trivy-cve-scan:
-    name: Trivy CVE scan
-    needs: [ci-gate]
-    if: needs.ci-gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Compute cache date
-        id: date
-        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Trivy DB cache
-        uses: actions/cache@v6
-        with:
-          path: .trivy-cache
-          key: trivy-db-${{ runner.os }}-${{ steps.date.outputs.date }}
-          restore-keys: |
-            trivy-db-${{ runner.os }}-
-
-      - name: Scan dependencies (no image to scan — filesystem/go.sum scan)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-          cache-dir: .trivy-cache
-
-      - name: Cancel run on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
-
   # Placeholder: no genuine runtime/service surface exists in this repo to
   # smoke-test — it's a library consumed by execution_service's connector
   # worker, not a standalone deployable.
@@ -137,48 +109,121 @@ jobs:
       - name: No-op placeholder
         run: echo "workflow-connectors is a library with no runtime to smoke-test — placeholder to satisfy the org branch-protection ruleset. Request a Dockerfile-less-repo exemption when possible."
 
+  # ── gates on validate-test ───────────────────────────────────────────────
+  trivy:
+    name: Trivy CVE scan
+    runs-on: ubuntu-latest
+    needs: [ci-gate, validate-test]
+    if: needs.ci-gate.outputs.run == 'true'
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Cache Trivy DB
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/trivy-cache
+          key: trivy-db-${{ runner.os }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      # No image to scan — filesystem scan of go.mod/go.sum.
+      # Table format: human-readable in CI logs; fails on CRITICAL/HIGH/UNKNOWN.
+      - name: Trivy scan — CRITICAL / HIGH / UNKNOWN
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # tools/go.mod holds golangci-lint, a development tool: its
+          # dependencies are not shipped and must not gate a release or
+          # appear in the SBOM.
+          skip-dirs: tools
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH,UNKNOWN
+          ignore-unfixed: true
+          cache-dir: /tmp/trivy-cache
+
+      # SARIF format: uploads to GitHub Security tab.
+      - name: Trivy scan — SARIF upload
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # tools/go.mod holds golangci-lint, a development tool: its
+          # dependencies are not shipped and must not gate a release or
+          # appear in the SBOM.
+          skip-dirs: tools
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          ignore-unfixed: true
+          cache-dir: /tmp/trivy-cache
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+
+      # CycloneDX SBOM — full dependency inventory for compliance / audit.
+      - name: Trivy SBOM — CycloneDX
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # tools/go.mod holds golangci-lint, a development tool: its
+          # dependencies are not shipped and must not gate a release or
+          # appear in the SBOM.
+          skip-dirs: tools
+          format: cyclonedx
+          output: sbom.cyclonedx.json
+          exit-code: '0'
+          cache-dir: /tmp/trivy-cache
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cyclonedx.json
+          retention-days: 90
+
+  # ── posts or updates a single comment on every PR push ───────────────────
   pr-summary:
     name: PR summary
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    needs: [ci-gate, validate-test, validate-quality, trivy, build-image-cache, lint-dockerfile, smoke-tests]
     if: always() && github.event_name == 'pull_request'
-    needs: [ci-gate, validate-quality, validate-test, build-image-cache, lint-dockerfile, trivy-cve-scan, smoke-tests]
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - name: Post summary
-        uses: actions/github-script@v9
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Post or update summary comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          JOB_RESULTS: ${{ toJSON(needs) }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
           CI_SKIPPED: ${{ needs.ci-gate.outputs.run != 'true' }}
         with:
           script: |
-            const results = JSON.parse(process.env.JOB_RESULTS);
-            const rows = Object.entries(results)
-              .map(([job, info]) => `| ${job} | ${info.result} |`)
-              .join('\n');
-            const skipNote = process.env.CI_SKIPPED === 'true'
-              ? '\n\n_CI gate closed — this PR is a draft or labeled `skip-ci`. Mark it ready for review (or remove the label) to run the full suite._'
-              : '';
-            const body = `### CI summary\n\n| Job | Result |\n| --- | --- |\n${rows}${skipNote}`;
-            const marker = '<!-- ci-pr-summary -->';
-            const markedBody = `${marker}\n${body}`;
-            const { data: comments } = await github.rest.issues.listComments({
-              ...context.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.find((c) => c.body && c.body.includes(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                ...context.repo,
-                comment_id: existing.id,
-                body: markedBody,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                ...context.repo,
-                issue_number: context.issue.number,
-                body: markedBody,
-              });
-            }
+            const fs = require('fs')
+            const code = fs.readFileSync('.github/scripts/pr-summary.js', 'utf8')
+            const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+            const run = new AsyncFunction('github', 'context', 'core', 'require', 'process', code)
+            await run(github, context, core, require, process)

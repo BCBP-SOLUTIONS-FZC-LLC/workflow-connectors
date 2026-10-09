@@ -1,0 +1,55 @@
+# Docker build context exclusions (modelled on iam-user-profile's).
+#
+# This module is a library with no Dockerfile of its own. The file applies
+# when the repository is used as a build context, for example a consuming
+# service that builds against a local checkout. It keeps that context to
+# what `go build ./pkg/...` needs: go.mod, go.sum and pkg/ (the embedded SQL
+# migrations live under pkg/). Volume mounts in docker-compose.yml, such as
+# scripts/init-floci.sh, are not affected by this file.
+
+# Version control
+.git
+.gitignore
+.githooks/
+.github/
+
+# Environment files — never bake secrets into an image
+.env
+.env.*
+*.env
+.env-example
+
+# Development tooling and docs
+.claude/
+docs/
+scripts/
+tools/
+*.md
+ARCHITECTURE.md
+README.md
+Makefile
+docker-compose.yml
+.editorconfig
+.golangci.yml
+.go-arch-lint.yml
+
+# Test artefacts
+test/
+**/*_test.go
+.coverage/
+coverage.out
+coverage.html
+*.coverprofile
+
+# Build artefacts already compiled outside Docker
+bin/
+
+# IDE and OS noise
+.idea/
+.vscode/
+*.DS_Store
+*.swp
+*.swo
+
+# Go tool cache (not needed in an image)
+vendor/

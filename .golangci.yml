@@ -10,15 +10,30 @@ linters:
     - errcheck
     - staticcheck
     - bodyclose
+    - depguard
   settings:
+    depguard:
+      rules:
+        # All database access goes through platform-pgcommon, in tests too:
+        # pools and configuration (pgcommon.NewPool, ConfigFromEnv), queries
+        # (Pool.WithConn, pgcommon.Conn/Row/Rows), transactions (RunInTx,
+        # Pool.WithTx), migrations (pgcommon/migrate) and error helpers
+        # (ErrNoRows, IsUniqueViolation, …).
+        pgcommon-only:
+          deny:
+            - pkg: github.com/jackc/pgx
+              desc: use platform-pgcommon (pgcommon.Conn, Row, Rows, Tx, TxOptions, ErrNoRows) instead of pgx directly
+            - pkg: database/sql
+              desc: use platform-pgcommon instead of database/sql
+            - pkg: github.com/lib/pq
+              desc: use platform-pgcommon instead of lib/pq
     revive:
       rules:
         - name: var-naming
     errcheck:
       check-blank: false
-
-issues:
-  exclude-rules:
-    - path: '_test\.go'
-      linters:
-        - revive
+  exclusions:
+    rules:
+      - path: '_test\.go'
+        linters:
+          - revive

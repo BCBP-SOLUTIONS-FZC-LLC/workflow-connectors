@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-make tidy
+make tidy-check
 make fmt-check
 make lint

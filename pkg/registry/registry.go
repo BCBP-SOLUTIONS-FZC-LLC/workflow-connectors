@@ -32,12 +32,24 @@ const (
 	FieldKindTimestamp FieldKind = "timestamp"
 )
 
+// RetryPolicy says which transient failures of a connector type may be
+// retried automatically. A permanent or unknown failure is never retried,
+// whatever the policy.
 type RetryPolicy string
 
 const (
-	RetryPolicySafe        RetryPolicy = "safe"
-	RetryPolicyUnsafe      RetryPolicy = "unsafe"
+	// RetryPolicySafe: every transient failure (storage).
+	RetryPolicySafe RetryPolicy = "safe"
+	// RetryPolicyUnsafe: never (chat-notify).
+	RetryPolicyUnsafe RetryPolicy = "unsafe"
+	// RetryPolicyConditional: transient failures of an idempotent HTTP
+	// method only (rest-call).
 	RetryPolicyConditional RetryPolicy = "conditional"
+	// RetryPolicyNotDelivered: transient failures the provider provably never
+	// accepted (send-email: DNS, connection refused, 429), so a retry cannot
+	// duplicate the message. A failure whose delivery is unknown is never
+	// retried.
+	RetryPolicyNotDelivered RetryPolicy = "not-delivered"
 )
 
 func IsIdempotentMethod(method string) bool {
@@ -79,6 +91,12 @@ func All() map[string]Definition {
 		chatNotifyDefinition(),
 	}
 
+	return indexByType(defs)
+}
+
+// indexByType keys definitions by Type, panicking on a duplicate: two
+// definitions claiming one type is a programming error in All.
+func indexByType(defs []Definition) map[string]Definition {
 	byType := make(map[string]Definition, len(defs))
 	for _, d := range defs {
 		if _, exists := byType[d.Type]; exists {

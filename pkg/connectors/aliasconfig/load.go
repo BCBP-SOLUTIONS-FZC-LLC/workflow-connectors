@@ -3,6 +3,7 @@ package aliasconfig
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -26,6 +27,13 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// Validate rejects a config that can never be valid. A restCall
+// pathTemplate and a sqlQuery path must start with "/", so appended to the
+// baseURL they can only extend its path, never change its host (a path
+// "@evil.example" would turn "http://svc" into a URL with userinfo "svc" and
+// host evil.example). rest-call and sql-query also check every request URL
+// against the baseURL at call time (shared.NewInternalRequest), since a Config
+// built in code need not have been validated.
 func (c Config) Validate() error {
 	seen := make(map[string]bool, len(c.RestCall))
 	for _, e := range c.RestCall {
@@ -39,11 +47,11 @@ func (c Config) Validate() error {
 		if !IsValidMethod(e.Method) {
 			return fmt.Errorf("restCall %q: invalid method %q", e.Alias, e.Method)
 		}
-		if e.BaseURL == "" {
-			return fmt.Errorf("restCall %q: baseURL is required", e.Alias)
+		if err := validateBaseURL(e.BaseURL); err != nil {
+			return fmt.Errorf("restCall %q: %w", e.Alias, err)
 		}
-		if e.PathTemplate == "" {
-			return fmt.Errorf("restCall %q: pathTemplate is required", e.Alias)
+		if !strings.HasPrefix(e.PathTemplate, "/") {
+			return fmt.Errorf("restCall %q: pathTemplate must start with \"/\"", e.Alias)
 		}
 	}
 
@@ -56,11 +64,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("sqlQuery: duplicate alias %q", q.Alias)
 		}
 		seenQ[q.Alias] = true
-		if q.BaseURL == "" {
-			return fmt.Errorf("sqlQuery %q: baseURL is required", q.Alias)
+		if err := validateBaseURL(q.BaseURL); err != nil {
+			return fmt.Errorf("sqlQuery %q: %w", q.Alias, err)
 		}
-		if q.Path == "" {
-			return fmt.Errorf("sqlQuery %q: path is required", q.Alias)
+		if !strings.HasPrefix(q.Path, "/") {
+			return fmt.Errorf("sqlQuery %q: path must start with \"/\"", q.Alias)
 		}
 		if q.QueryID == "" {
 			return fmt.Errorf("sqlQuery %q: queryId is required", q.Alias)
@@ -80,4 +88,21 @@ func IsValidMethod(m string) bool {
 	default:
 		return false
 	}
+}
+
+// validateBaseURL requires an absolute http or https URL with a host and no
+// userinfo. Which hosts are allowed is enforced where aliases are written
+// (definition_service); this only rejects shapes that can never be valid.
+func validateBaseURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("baseURL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("baseURL %q: %w", raw, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return fmt.Errorf("baseURL %q must be an http or https URL with a host and no userinfo", raw)
+	}
+	return nil
 }

@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant W as connector-worker
+    participant R as restcall.Connector
+    participant AC as aliasconfig.Config (by value, from New)
+    participant S as Internal service (e.g. Tender API)
+
+    W ->> W: ctx = connectors.WithDepartments(ctx, ["{dept_uuid}:{role}", ...])
+    W ->>+ R: Execute(ctx, {endpointAlias, pathParams, queryParams, body})
+    Note over R: endpointAlias required → else ErrValidation
+    R ->>+ AC: ResolveEndpoint(alias)
+    AC -->>- R: Endpoint{Method, BaseURL, PathTemplate, Timeout}<br/>or aliasconfig.ErrUnknownAlias
+    Note over R: no usable departments in ctx → ErrMissingInternalAuth (fails closed, nothing sent)<br/>{placeholders} filled with url.PathEscape'd pathParams (no "", ".", ".."),<br/>URL must keep BaseURL's scheme + host, no userinfo
+    R ->>+ S: METHOD BaseURL+path?query<br/>x-internal-token: Config.InternalToken<br/>x-departments: comma-joined<br/>(context timeout = Endpoint.Timeout when set)
+    S -->>- R: status · headers · body (JSON decoded, numbers as json.Number, when Content-Type has "json")
+    Note over R,S: client never follows redirects — a 3xx is returned, not chased,<br/>so the two headers never reach another host — HTTP/1.1 only,<br/>each call bounded by Endpoint.Timeout, else 30 s (shared.CallTimeout)
+    alt status < 300
+        R -->> W: {status, headers, body}
+    else status >= 300
+        R -->>- W: {status, headers, body} AND ErrUpstream
+    end

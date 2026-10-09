@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/shared"
 )
 
 type mockObject struct {
@@ -38,7 +40,7 @@ func (m *MockStorageClient) Reset() {
 
 func objectKey(bucket, key string) string { return bucket + "/" + key }
 
-func (m *MockStorageClient) Fetch(_ context.Context, bucket, key string) ([]byte, string, error) {
+func (m *MockStorageClient) Fetch(_ context.Context, bucket, key string, maxBytes int64) ([]byte, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
@@ -47,6 +49,9 @@ func (m *MockStorageClient) Fetch(_ context.Context, bucket, key string) ([]byte
 	obj, ok := m.objects[objectKey(bucket, key)]
 	if !ok {
 		return nil, "", fmt.Errorf("mock storage: object %s/%s not found", bucket, key)
+	}
+	if int64(len(obj.content)) > maxBytes {
+		return nil, "", shared.TooLarge(fmt.Sprintf("object %q", key), maxBytes)
 	}
 	return obj.content, obj.contentType, nil
 }

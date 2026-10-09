@@ -6,11 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/aliasconfig"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/shared"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/aliasconfig"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/shared"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/registry"
 )
 
 type Connector struct {
@@ -19,11 +18,11 @@ type Connector struct {
 	internalToken string
 }
 
+// New builds the connector. httpClient is copied and never follows redirects
+// (shared.InternalHTTPClient); nil means a default client. Each call is
+// bounded by its alias's timeout, or shared.DefaultHTTPTimeout.
 func New(aliases aliasconfig.Config, httpClient *http.Client, internalToken string) Connector {
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
-	return Connector{aliases: aliases, httpClient: httpClient, internalToken: internalToken}
+	return Connector{aliases: aliases, httpClient: shared.InternalHTTPClient(httpClient), internalToken: internalToken}
 }
 
 func (Connector) Type() string { return registry.TypeSQLQuery }
@@ -44,7 +43,7 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 	}
 	q, err := aliasconfig.ResolveQuery(s.aliases, alias)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", shared.ErrValidation, err)
 	}
 
 	params, _ := input["params"].([]any)
@@ -52,9 +51,9 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, fmt.Errorf("%w: queryAlias %q expects %d params, got %d", shared.ErrValidation, alias, q.ParamCount, len(params))
 	}
 
-	departments, ok := shared.DepartmentsFromContext(ctx)
-	if !ok {
-		return nil, shared.ErrMissingInternalAuth
+	departments, err := shared.DepartmentsHeaderValue(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	encoded, err := json.Marshal(sqlQueryRequest{QueryID: q.QueryID, Params: params})
@@ -62,34 +61,36 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, fmt.Errorf("%w: encoding request: %s", shared.ErrValidation, err)
 	}
 
-	reqCtx := ctx
-	if q.Timeout > 0 {
-		var cancel context.CancelFunc
-		reqCtx, cancel = context.WithTimeout(ctx, q.Timeout)
-		defer cancel()
-	}
+	// Every call has a deadline: the alias's own timeout, else the default.
+	reqCtx, cancel := context.WithTimeout(ctx, shared.CallTimeout(q.Timeout))
+	defer cancel()
 
-	fullURL := strings.TrimRight(q.BaseURL, "/") + q.Path
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, fullURL, bytes.NewReader(encoded))
+	req, err := shared.NewInternalRequest(reqCtx, http.MethodPost, q.BaseURL, q.Path, bytes.NewReader(encoded))
 	if err != nil {
-		return nil, fmt.Errorf("%w: building request: %s", shared.ErrValidation, err)
+		return nil, fmt.Errorf("sql-query %q: %w", alias, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(shared.InternalTokenHeader, s.internalToken)
-	req.Header.Set(shared.DepartmentsHeader, strings.Join(departments, ","))
+	req.Header.Set(shared.DepartmentsHeader, departments)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("connectors: sql-query %q: %w", alias, err)
+		return nil, shared.Classify(fmt.Sprintf("sql-query %q", alias), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var parsed sqlQueryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("%w: sql-query %q: decoding response: %s", shared.ErrUpstream, alias, err)
+	// Status first: an error page is rarely the JSON shape below, and its
+	// decode error would hide the status. 3xx included: redirects are not followed.
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.HTTPStatusError(resp.StatusCode, fmt.Errorf("sql-query %q: status %d", alias, resp.StatusCode)))
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("%w: sql-query %q: status %d", shared.ErrUpstream, alias, resp.StatusCode)
+	raw, err := shared.ReadAllLimited(resp.Body, shared.MaxResponseBytes, "response body")
+	if err != nil {
+		return nil, shared.Classify(fmt.Sprintf("sql-query %q: reading response", alias), err)
+	}
+	var parsed sqlQueryResponse
+	if err := shared.DecodeJSON(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.Permanent("malformed response", fmt.Errorf("sql-query %q: decoding response: %w", alias, err)))
 	}
 
 	return map[string]any{"resultSet": parsed.ResultSet}, nil

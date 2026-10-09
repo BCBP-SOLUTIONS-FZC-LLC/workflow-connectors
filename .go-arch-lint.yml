@@ -1,0 +1,202 @@
+version: 3
+workdir: .
+
+allow:
+  # Unlike a service, every third-party import is declared below: the whole
+  # point of the core/adapter split is that only provider adapters may pull in
+  # a cloud SDK, so vendor imports are checked per component, not allowed
+  # wholesale.
+  depOnAnyVendor: false
+  deepScan: false
+
+excludeFiles:
+  - '.*_test\.go$'
+
+vendors:
+  uuid:
+    in: github.com/google/uuid
+  yaml:
+    in: gopkg.in/yaml.v3
+  aws-sdk:
+    in: github.com/aws/aws-sdk-go-v2/**
+  azure-sdk:
+    in: github.com/Azure/azure-sdk-for-go/**
+  gocloud:
+    in: gocloud.dev/**
+  google-api:
+    in: google.golang.org/api/**
+  oauth2:
+    in:
+      - golang.org/x/oauth2
+      - golang.org/x/oauth2/**
+  # platform-pgcommon: the database access layer every service on the platform
+  # uses — connections, configuration, transactions, migrations and error
+  # classification all go through it. pgx is deliberately NOT listed: the
+  # stores use pgcommon's own API (RunInTx, Tx, Row, TxOptions, ErrNoRows and
+  # the Is* SQLSTATE classifiers), so importing pgx (or database/sql) directly
+  # fails this lint.
+  # Granted to the two sqlstore components only.
+  pgcommon:
+    in:
+      - github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/**
+  valkey:
+    in:
+      - github.com/redis/go-redis/v9
+      - github.com/redis/go-redis/v9/**
+  sendgrid:
+    in:
+      - github.com/sendgrid/sendgrid-go
+      - github.com/sendgrid/sendgrid-go/**
+
+components:
+  # Connector type list + authoring-template shapes. Imported by
+  # definition_service, so it must stay dependency-free.
+  registry:
+    in: pkg/registry
+
+  # Errors, field helpers, document refs, header names.
+  shared:
+    in: pkg/connectors/shared
+
+  # Alias schema, loader, resolvers.
+  aliasconfig:
+    in: pkg/connectors/aliasconfig
+
+  # Connector core: input validation, ProviderClient ports, client cache,
+  # in-memory mocks. No cloud SDKs.
+  connector_core:
+    in:
+      - pkg/connectors/storage
+      - pkg/connectors/sendemail
+      - pkg/connectors/chatnotify
+      - pkg/connectors/restcall
+      - pkg/connectors/sqlquery
+      - pkg/connectors/documentextract
+
+  # Document registry port, state machine and in-memory store: the
+  # uniqueness authority for uploads to stores without atomic create-if-absent.
+  documents:
+    in: pkg/connectors/documents
+
+  # PostgreSQL implementation of the documents port, on platform-pgcommon; the
+  # worker supplies its *pgcommon.Pool.
+  document_sqlstore:
+    in: pkg/connectors/documents/sqlstore
+
+  # Document references: the Service, its Store and ContentStore ports, and the
+  # in-memory stores for unit tests.
+  docref:
+    in: pkg/connectors/docref
+
+  # Document refs: metadata in Valkey, content in the S3 document bucket.
+  docref_valkeystore:
+    in: pkg/connectors/docref/valkeystore
+
+  docref_s3content:
+    in: pkg/connectors/docref/s3content
+
+  # send-email duplicate-request protection (send intents): port + in-memory
+  # store, and its PostgreSQL store on platform-pgcommon.
+  send_intents:
+    in: pkg/connectors/sendintent
+
+  send_intents_sqlstore:
+    in: pkg/connectors/sendintent/sqlstore
+
+  # Provider adapters: implement a core ProviderClient on top of one SDK.
+  provider_adapters:
+    in:
+      - pkg/connectors/storage/gocloud
+      - pkg/connectors/storage/googledrive
+      - pkg/connectors/sendemail/ses
+      - pkg/connectors/sendemail/sendgrid
+      - pkg/connectors/sendemail/msgraph
+      - pkg/connectors/sendemail/gmail
+
+  # connectors.New / Config. Providers are injected through Config by the
+  # consumer (execution_service's cmd/connector-worker), which is the real
+  # composition root — so this package never imports an adapter.
+  connectors:
+    in: pkg/connectors
+
+# registry and shared are deliberately absent: a component with no deps
+# entry may import nothing from this module and no vendor.
+deps:
+  aliasconfig:
+    canUse:
+      - yaml
+
+  connector_core:
+    mayDependOn:
+      - registry
+      - shared
+      - aliasconfig
+      - send_intents
+      - docref
+    canUse:
+      - uuid
+
+  documents:
+    mayDependOn:
+      - shared
+    canUse:
+      - uuid
+
+  document_sqlstore:
+    mayDependOn:
+      - documents
+      - shared
+    canUse:
+      - pgcommon
+
+  send_intents:
+    mayDependOn:
+      - shared
+    canUse:
+      - uuid
+
+  docref:
+    canUse:
+      - uuid
+
+  docref_valkeystore:
+    mayDependOn:
+      - docref
+    canUse:
+      - valkey
+
+  docref_s3content:
+    mayDependOn:
+      - docref
+    canUse:
+      - aws-sdk
+
+  send_intents_sqlstore:
+    mayDependOn:
+      - send_intents
+      - shared
+    canUse:
+      - pgcommon
+
+  provider_adapters:
+    mayDependOn:
+      - connector_core
+      - documents
+      - shared
+    canUse:
+      - uuid
+      - aws-sdk
+      - azure-sdk
+      - gocloud
+      - google-api
+      - oauth2
+      - sendgrid
+
+  connectors:
+    mayDependOn:
+      - connector_core
+      - shared
+      - aliasconfig
+      - registry
+      - send_intents
+      - docref

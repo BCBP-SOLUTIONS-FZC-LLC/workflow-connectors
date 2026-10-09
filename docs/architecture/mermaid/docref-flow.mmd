@@ -1,0 +1,20 @@
+graph LR
+    subgraph a["Worker replica A"]
+        sf["storage fetch\ncreateDocument=true"]
+    end
+    subgraph b["Worker replica B"]
+        se["send-email\nattachments = [ref, ...]"]
+        su["storage upload\ncontent = ref"]
+        svc["docref.Service — resolve\n1 metadata · 2 tenant check\n3 GET object · 4 verify size + SHA-256"]
+    end
+    s3[("S3 document bucket — content (system of record)\n{prefix}{tenant_id}/{uuid}\nworker's own credentials · SSE-KMS · lifecycle 2 days")]
+    vk[("Valkey — reference metadata only\nhash docref:{uuid}\nreference_id · tenant_id · bucket · object_key\ncontent_type · size · sha256 · created_at · updated_at\nAOF · noeviction · 24 h key TTL · no content")]
+
+    sf -->|"1. PUT object"| s3
+    sf -->|"2. create-only metadata + WAITAOF"| vk
+    sf -->|"3. contentRef"| out(["workflow variable\n(any replica may run the next task)"])
+    se --> svc
+    su --> svc
+    svc -->|"HGETALL"| vk
+    svc -->|"GET object (stream)"| s3
+    svc -.->|"missing → ErrSourceMissing\nmismatch → ErrIntegrityViolation"| err(["task fails before sending or uploading"])

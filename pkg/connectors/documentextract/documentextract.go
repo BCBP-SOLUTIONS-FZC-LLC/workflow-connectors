@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/shared"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/shared"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/registry"
 )
 
 type ProviderClient interface {
@@ -33,16 +33,19 @@ type Connector struct {
 	client ProviderClient
 }
 
+// New builds the connector. A nil client is not replaced by the mock: every
+// call then fails with ErrValidation (Decision #20). Pass
+// NewMockDocumentExtractClient() explicitly in tests.
 func New(client ProviderClient) Connector {
-	if client == nil {
-		client = NewMockDocumentExtractClient()
-	}
 	return Connector{client: client}
 }
 
 func (Connector) Type() string { return registry.TypeDocumentExtract }
 
 func (d Connector) Execute(ctx context.Context, input map[string]any) (map[string]any, error) {
+	if d.client == nil {
+		return nil, fmt.Errorf("%w: document-extract has no provider configured", shared.ErrValidation)
+	}
 	docRef, err := resolveDocumentRef(input)
 	if err != nil {
 		return nil, err
@@ -62,7 +65,7 @@ func (d Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 
 	result, err := d.client.Analyze(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: document-extract: %s", shared.ErrUpstream, err)
+		return nil, shared.Classify("document-extract", err)
 	}
 
 	out := map[string]any{"rawText": result.RawText}

@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/aliasconfig"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/connectors/shared"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/pkg/registry"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/aliasconfig"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/shared"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/registry"
 )
 
 type Connector struct {
@@ -20,11 +20,11 @@ type Connector struct {
 	internalToken string
 }
 
+// New builds the connector. httpClient is copied and never follows redirects
+// (shared.InternalHTTPClient); nil means a default client. Each call is
+// bounded by its alias's timeout, or shared.DefaultHTTPTimeout.
 func New(aliases aliasconfig.Config, httpClient *http.Client, internalToken string) Connector {
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
-	return Connector{aliases: aliases, httpClient: httpClient, internalToken: internalToken}
+	return Connector{aliases: aliases, httpClient: shared.InternalHTTPClient(httpClient), internalToken: internalToken}
 }
 
 func (Connector) Type() string { return registry.TypeRestCall }
@@ -36,19 +36,18 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 	}
 	ep, err := aliasconfig.ResolveEndpoint(r.aliases, alias)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", shared.ErrValidation, err)
 	}
 
-	departments, ok := shared.DepartmentsFromContext(ctx)
-	if !ok {
-		return nil, shared.ErrMissingInternalAuth
+	departments, err := shared.DepartmentsHeaderValue(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	path, err := shared.RenderPathTemplate(ep.PathTemplate, shared.AsMap(input["pathParams"]))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", shared.ErrValidation, err)
+		return nil, err
 	}
-	fullURL := strings.TrimRight(ep.BaseURL, "/") + path
 
 	var body io.Reader
 	if b, ok := input["body"]; ok && b != nil {
@@ -59,42 +58,53 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		body = bytes.NewReader(encoded)
 	}
 
-	reqCtx := ctx
-	if ep.Timeout > 0 {
-		var cancel context.CancelFunc
-		reqCtx, cancel = context.WithTimeout(ctx, ep.Timeout)
-		defer cancel()
-	}
+	// Every call has a deadline: the alias's own timeout, else the default.
+	reqCtx, cancel := context.WithTimeout(ctx, shared.CallTimeout(ep.Timeout))
+	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, strings.ToUpper(ep.Method), fullURL, body)
+	req, err := shared.NewInternalRequest(reqCtx, strings.ToUpper(ep.Method), ep.BaseURL, path, body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: building request: %s", shared.ErrValidation, err)
+		return nil, fmt.Errorf("rest-call %q: %w", alias, err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	shared.ApplyQueryParams(req, shared.AsMap(input["queryParams"]))
+	if err := shared.ApplyQueryParams(req, shared.AsMap(input["queryParams"])); err != nil {
+		return nil, err
+	}
 	req.Header.Set(shared.InternalTokenHeader, r.internalToken)
-	req.Header.Set(shared.DepartmentsHeader, strings.Join(departments, ","))
+	req.Header.Set(shared.DepartmentsHeader, departments)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("connectors: rest-call %q: %w", alias, err)
+		return nil, shared.Classify(fmt.Sprintf("rest-call %q", alias), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := shared.DecodeResponseBody(resp)
-	if err != nil {
-		return nil, fmt.Errorf("%w: rest-call %q: decoding response: %s", shared.ErrUpstream, alias, err)
+	if resp.StatusCode >= 300 {
+		// 3xx included: redirects are not followed, so one is a failed call.
+		// The status alone classifies it: the body is read without failing
+		// (shared.DecodeErrorResponseBody), so an oversized or cut-off error
+		// page can never turn a transient 503 into a permanent error.
+		body, truncated := shared.DecodeErrorResponseBody(resp)
+		out := output(resp, body)
+		if truncated {
+			out["bodyTruncated"] = true
+		}
+		return out, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.HTTPStatusError(resp.StatusCode, fmt.Errorf("rest-call %q: status %d", alias, resp.StatusCode)))
 	}
 
-	out := map[string]any{
+	respBody, err := shared.DecodeResponseBody(resp)
+	if err != nil {
+		return nil, shared.Classify(fmt.Sprintf("rest-call %q: reading response", alias), err)
+	}
+	return output(resp, respBody), nil
+}
+
+func output(resp *http.Response, body any) map[string]any {
+	return map[string]any{
 		"status":  resp.StatusCode,
 		"headers": shared.FlattenHeaders(resp.Header),
-		"body":    respBody,
+		"body":    body,
 	}
-	if resp.StatusCode >= 400 {
-		return out, fmt.Errorf("%w: rest-call %q: status %d", shared.ErrUpstream, alias, resp.StatusCode)
-	}
-	return out, nil
 }

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test:*)",
+      "Bash(go build:*)",
+      "Bash(go run:*)",
+      "Bash(go mod:*)",
+      "Bash(go fmt:*)",
+      "Bash(go vet:*)",
+      "Bash(go tool:*)",
+      "Bash(go list:*)",
+      "Bash(go doc:*)",
+      "Bash(make:*)",
+      "Bash(docker compose ps:*)",
+      "Bash(docker compose logs:*)",
+      "Bash(find .:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": []
+  }
+}

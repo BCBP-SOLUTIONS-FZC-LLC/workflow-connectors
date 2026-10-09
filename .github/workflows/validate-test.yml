@@ -1,8 +1,9 @@
-# Reusable workflow — test gate (race detector unit tests).
-# Called by ci.yml. Job name must stay "test" — combined with the
-# caller job's "Validate / Test" name it produces the required
-# branch-protection check "Validate / Test / test".
-name: Validate Test
+# Reusable workflow — test gate.
+# Race detector + coverage gate + compile-check.
+# Called by ci.yml and release.yml. Gates trivy. Job name must stay "test" —
+# combined with the caller job's "Validate / Test" name it produces the
+# required branch-protection check "Validate / Test / test".
+name: Validate / Test
 
 "on":
   workflow_call:
@@ -12,6 +13,13 @@ name: Validate Test
         type: string
         required: false
         default: ''
+    outputs:
+      pct:
+        description: 'Total statement coverage percentage'
+        value: ${{ jobs.test.outputs.pct }}
+      threshold:
+        description: 'Coverage gate threshold percentage'
+        value: ${{ jobs.test.outputs.threshold }}
 
 permissions:
   contents: read
@@ -22,34 +30,87 @@ env:
 jobs:
   test:
     name: test
-    permissions:
-      contents: read
-      actions: write
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    # Integration infrastructure comes from docker-compose.yml — the same
+    # stack `make docker-up` starts locally: PostgreSQL (direct and through
+    # PgBouncer in transaction mode), Valkey with the production persistence
+    # settings, and floci S3. The TEST_* values match the compose host ports.
+    env:
+      TEST_POSTGRES_DSN: postgres://postgres:test@localhost:55432/connectors?sslmode=disable
+      TEST_PGBOUNCER_DSN: postgres://postgres:test@localhost:55433/connectors?sslmode=disable
+      TEST_VALKEY_ADDR: localhost:56379
+      TEST_S3_ENDPOINT: http://localhost:4580
+      # The Valkey restart tests run their own containers.
+      TEST_VALKEY_DOCKER: "1"
+    outputs:
+      pct: ${{ steps.gate.outputs.pct }}
+      threshold: ${{ steps.gate.outputs.threshold }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Start integration infrastructure
+        run: docker compose up -d --wait
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: |
             go.sum
             go.mod
 
-      - name: Test (race detector)
+      # Store credentials so go mod download can fetch private BCBP modules
+      # (platform-pgcommon). Mirrors iam-org-membership and platform-events
+      # (secrets.GO_PRIVATE_TOKEN, an org-level secret).
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: go mod download
+
+      - name: Verify modules
+        run: go mod verify
+
+      # Mandatory blocking gate: runs the unit, postgres and integration suites
+      # in parallel with -race, each with its own coverage profile, merged into
+      # coverage.out (scripts/merge_coverage.py, as iam-org-membership). Any
+      # data race detected here blocks trivy and the release. Do NOT remove or
+      # skip.
+      - name: Tests (race + coverage)
         run: make test-ci
+
+      # Total statement coverage across pkg/... must meet COVERAGE_THRESHOLD.
+      # This is a ratchet: raise it as coverage improves, never lower it.
+      - name: Coverage threshold gate
+        id: gate
+        env:
+          COVERAGE_THRESHOLD: '98'
+        run: bash .github/scripts/coverage-gate.sh
+
+      - name: Infrastructure logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Build (compile-check)
         run: make build
-
-      - name: Cancel run on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
