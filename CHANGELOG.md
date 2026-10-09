@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The release job graph matches platform-pgcommon's.** It adds "Build image (cache)" and "Smoke tests" as placeholders (as in `ci.yml`), wired where pgcommon's image jobs sit. Trivy now waits for both test and image, as in CI. A **Build source archive** job (`build-source-archive.sh`), the counterpart of pgcommon's "Build binaries", runs after both validation gates. The publish job re-checks the archive against its `.sha256` before signing `checksums.txt`.
+
+### Fixed
+
+- **CI and release no longer fail on Docker Hub's anonymous pull rate limit.** The v2.0.0 release run failed on it before any test ran. The compose images and the Valkey restart tests' containers now come from `WC_REGISTRY` (default `docker.io`; CI uses `mirror.gcr.io`, Google's Docker Hub mirror, with the same digests), and `validate-test.yml` pulls them with retries before starting the stack.
+
 ## [2.0.0] - 2026-10-10
 
 A new major version at module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`: consumers change their imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`. Read **Changed** for every breaking change, and [`docs/integration/connector-worker.md`](docs/integration/connector-worker.md) for wiring the worker (platform-pgcommon v2.0.1+, both `ApplySchema` migrations, `DocRefs`, `SendIntents`, `DecideRetry`).

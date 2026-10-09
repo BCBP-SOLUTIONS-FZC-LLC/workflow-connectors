@@ -68,7 +68,10 @@ WC_PG_PORT        ?= 55432
 WC_PGBOUNCER_PORT ?= 55433
 WC_VALKEY_PORT    ?= 56379
 WC_FLOCI_PORT     ?= 4580
-export WC_PG_PORT WC_PGBOUNCER_PORT WC_VALKEY_PORT WC_FLOCI_PORT
+# Registry for the compose images and the Valkey restart tests' containers
+# (pinned by digest); CI sets mirror.gcr.io.
+WC_REGISTRY       ?= docker.io
+export WC_PG_PORT WC_PGBOUNCER_PORT WC_VALKEY_PORT WC_FLOCI_PORT WC_REGISTRY
 
 INT_ENV := TEST_POSTGRES_DSN='postgres://postgres:test@localhost:$(WC_PG_PORT)/connectors?sslmode=disable' \
            TEST_PGBOUNCER_DSN='postgres://postgres:test@localhost:$(WC_PGBOUNCER_PORT)/connectors?sslmode=disable' \

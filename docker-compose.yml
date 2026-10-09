@@ -23,6 +23,10 @@
 #   make docker-down         stop and delete the volumes
 #
 # Images are pinned by digest (tag kept for readability); bump both together.
+# WC_REGISTRY (default docker.io) is the registry they are pulled from: CI
+# sets mirror.gcr.io, Google's Docker Hub mirror, because anonymous Docker
+# Hub pulls from shared runner IPs hit the pull rate limit. The digest pins
+# the content whichever registry serves it.
 #
 # Host ports are chosen not to collide with the IAM services' stacks (which
 # use 5432-5434, 6379 and 4566-4569) and can be overridden from the
@@ -30,7 +34,7 @@
 
 services:
   postgres:
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    image: ${WC_REGISTRY:-docker.io}/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: test
@@ -50,7 +54,7 @@ services:
       retries: 30
 
   pgbouncer:
-    image: edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
+    image: ${WC_REGISTRY:-docker.io}/edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
@@ -74,7 +78,7 @@ services:
       retries: 30
 
   valkey:
-    image: valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
+    image: ${WC_REGISTRY:-docker.io}/valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
     # The settings docs/runbooks/document-refs.md requires for ref metadata:
     # every write fsynced to the AOF, and memory pressure refusing writes
     # instead of evicting live refs.
@@ -99,7 +103,7 @@ services:
       retries: 30
 
   floci:
-    image: floci/floci:2.1.0-compat@sha256:bb98b11f837bdacdda21ce6635a0773509e50aa471c35be9332a9efef502127c
+    image: ${WC_REGISTRY:-docker.io}/floci/floci:2.1.0-compat@sha256:bb98b11f837bdacdda21ce6635a0773509e50aa471c35be9332a9efef502127c
     ports:
       - "${WC_FLOCI_PORT:-4580}:4566"
     environment:
