@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-09
+
 ### Security
 
 - `gcp-gcs` accepts only a `service_account` key (`google.CredentialsFromJSONWithType`); a workload-identity or other credential type is refused instead of being read from the worker's filesystem.
