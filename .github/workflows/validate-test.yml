@@ -63,6 +63,11 @@ jobs:
       TEST_S3_ENDPOINT: http://localhost:4580
       # The Valkey restart tests run their own containers.
       TEST_VALKEY_DOCKER: "1"
+      # Every image (compose and the Valkey restart tests) comes from Google's
+      # Docker Hub mirror: anonymous Docker Hub pulls from shared runner IPs
+      # hit the pull rate limit (the first v2.0.0 release run failed on it).
+      # Images are pinned by digest, so the content is the same.
+      WC_REGISTRY: mirror.gcr.io
     outputs:
       pct: ${{ steps.gate.outputs.pct }}
       threshold: ${{ steps.gate.outputs.threshold }}
@@ -73,6 +78,18 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      # Pulled first, with retries, so a registry hiccup is retried rather
+      # than failing the gate before any test runs.
+      - name: Pull integration images
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose pull --quiet; then exit 0; fi
+            echo "::warning title=Image pull::attempt ${attempt} failed — retrying in $((attempt * 20)) s"
+            sleep $((attempt * 20))
+          done
+          echo "::error title=Image pull::could not pull the integration images from ${WC_REGISTRY}"
+          exit 1
 
       - name: Start integration infrastructure
         run: docker compose up -d --wait

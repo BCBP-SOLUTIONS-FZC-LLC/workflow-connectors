@@ -204,8 +204,16 @@ func TestCheckDurability_ConfiguredServerPasses(t *testing.T) {
 // Restarting a server must not disturb other test packages, so these tests
 // run their own containers.
 
-// valkeyImage is the image docker-compose.yml runs, pinned by the same digest.
-const valkeyImage = "valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507"
+// valkeyImage is the image docker-compose.yml runs, pinned by the same digest
+// and pulled from the same registry (WC_REGISTRY, default docker.io; CI uses
+// mirror.gcr.io to avoid Docker Hub's anonymous pull rate limit).
+func valkeyImage() string {
+	registry := os.Getenv("WC_REGISTRY")
+	if registry == "" {
+		registry = "docker.io"
+	}
+	return registry + "/valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507"
+}
 
 func dockerValkey(t *testing.T, args ...string) (name, addr string) {
 	t.Helper()
@@ -216,7 +224,7 @@ func dockerValkey(t *testing.T, args ...string) (name, addr string) {
 		t.Skip("TEST_VALKEY_DOCKER not set (make test-integration)")
 	}
 	name = "docref-valkey-" + uuid.NewString()[:8]
-	run := append([]string{"run", "-d", "--name", name, "-p", "127.0.0.1::6379", valkeyImage, "valkey-server"}, args...)
+	run := append([]string{"run", "-d", "--name", name, "-p", "127.0.0.1::6379", valkeyImage(), "valkey-server"}, args...)
 	out, err := exec.Command("docker", run...).CombinedOutput()
 	require.NoError(t, err, string(out))
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
