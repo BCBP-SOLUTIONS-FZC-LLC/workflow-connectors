@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-10
+
+A new major version at module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`: consumers change their imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`. Read **Changed** for every breaking change, and [`docs/integration/connector-worker.md`](docs/integration/connector-worker.md) for wiring the worker (platform-pgcommon v2.0.1+, both `ApplySchema` migrations, `DocRefs`, `SendIntents`, `DecideRetry`).
+
 ### Security
 
 - **platform-pgcommon v2.0.0 → v2.0.1.** It applies the transaction timeouts inside `WithConn`'s PgBouncer wrapping transaction and builds with go1.26.9. No API change.
