@@ -1,5 +1,6 @@
 # Reusable workflow — quality gate.
-# fmt · tidy · vet · lint (golangci-lint) · arch-lint · vuln-check.
+# fmt · tidy · vet · lint (golangci-lint) · arch-lint · docs-check ·
+# CI-script tests · vuln-check · supply-chain checks (SHA-pinned actions).
 # Called by ci.yml and release.yml. Job name must stay "quality" — combined
 # with the caller job's "Validate / Quality" name it produces the required
 # branch-protection check "Validate / Quality / quality".
@@ -13,6 +14,25 @@ name: Validate / Quality
         type: string
         required: false
         default: ''
+      skip:
+        description: >-
+          Skip the job (ci.yml: documentation-only change, draft PR or the
+          skip-ci label). Skipped here, not at the caller, so the required
+          check "<workflow> / <job>" still reports (a skipped job counts as
+          success for branch protection).
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      # The only secrets this workflow reads. Callers pass them explicitly —
+      # no `secrets: inherit`, so PR test code never runs with other secrets
+      # in scope.
+      GO_PRIVATE_TOKEN:
+        description: 'Read access to the private BCBP Go modules (platform-pgcommon)'
+        required: false
+      CI_REPO_READ_TOKEN:
+        description: 'Checkout of a private repository (github.token is the fallback)'
+        required: false
 
 permissions:
   contents: read
@@ -23,8 +43,9 @@ env:
 jobs:
   quality:
     name: quality
+    if: ${{ !inputs.skip }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,6 +145,12 @@ jobs:
       # verbatim; a diagram edited in one place only fails here.
       - name: Architecture diagrams in sync
         run: make docs-check
+
+      # Regression tests for the CI scripts: detect-changes.sh's docs-only
+      # decision (renames, moves, deletions, spaces, '::' paths) and its log
+      # sanitising. A wrong docs-only verdict would skip every required check.
+      - name: CI script tests
+        run: make ci-scripts-test
 
       - name: Vulnerability check
         run: |

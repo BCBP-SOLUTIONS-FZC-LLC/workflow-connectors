@@ -181,7 +181,7 @@ workflow-connectors/
 ├── docker-compose.yml                # test stack: PostgreSQL 17, PgBouncer, Valkey 8, floci S3
 ├── .go-arch-lint.yml                 # component + vendor rules (§3.2)
 ├── .golangci.yml                     # revive, errcheck, staticcheck, bodyclose, depguard (pgcommon-only)
-├── .github/workflows/                # ci, validate-quality, validate-test, release, changelog-check
+├── .github/workflows/                # ci, validate-quality, validate-test, release, docs, changelog-check
 ├── .github/scripts/                  # arch-lint, coverage-gate, pr-summary, release helpers
 └── Makefile                          # §14.6, §20
 ```
@@ -782,7 +782,7 @@ No image, binary, chart or migration. A release is a Git tag `vX.Y.Z` consumed t
 
 ### 13.2 Release pipeline
 
-`release.yml` on a version tag: re-run Validate / Quality and Validate / Test at the tag → verify the tag points at the checkout (any of several tags on one commit), the commit is on `main`, and the tag's major version matches the module path (`/v2` for v2.x) → verify `CHANGELOG.md` has `## [X.Y.Z]` → compile → Trivy filesystem scan (CRITICAL/HIGH fail; skips `tools/`; SARIF to the Security tab) and CycloneDX SBOM → GitHub Release with the changelog section, a `go get` line, a source archive, the SBOM and `checksums.txt`. A tag with a `-` suffix is a pre-release.
+`release.yml` on a version tag, in platform-pgcommon's structure: **verify** (a manual dispatch only from `main` or the tag; the tag points at the checkout, any of several tags on one commit; the commit is on `main`; the tag's major version matches the module path, `/v2` for v2.x; `CHANGELOG.md` has `## [X.Y.Z]`, which a prerelease may share) → Validate / Test ∥ Validate / Quality at the tag ∥ **API compatibility, blocking** (apidiff against the previous stable tag; a non-major release fails on an incompatible exported-API change) → Trivy filesystem scan (CRITICAL/HIGH/UNKNOWN fail; skips `tools/`; SARIF to the Security tab) and CycloneDX SBOM → **publish**: the changelog section with a `go get` line, a source archive, `checksums.txt` over it and the SBOM signed with Cosign (keyless, bundle `checksums.txt.sigstore.json`), and the GitHub Release. A tag with a `-` suffix is a pre-release. `ci.yml` runs the same gates on every PR and push to `main`, skipping the build/test jobs on a documentation-only change (`detect-changes.sh`) while still reporting the required checks; `docs.yml` checks the diagrams on such changes; `api-compat` there is a warning.
 
 ### 13.3 Versioning
 

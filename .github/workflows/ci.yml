@@ -1,19 +1,37 @@
 # CI for https://github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors
 #
-# Parallel flow:
+# Same structure as platform-pgcommon's ci.yml, scoped to a library that
+# builds no image. Parallel flow (every job below needs `changes`):
 #
-#   ci-gate ──┬─► validate-test ──► trivy ──┐
-#             └─► validate-quality ─────────┤──► pr-summary (PR events only)
+#   changes ──┬─► validate-test ──► trivy ──┐
+#             ├─► validate-quality ─────────┤──► pr-summary (PR events only)
+#             └─► api-compat (informational)│
 #   build-image-cache · lint-dockerfile ·   │
 #   smoke-tests (no-op placeholders) ───────┘
 #
-# validate-test runs the race+coverage gate and gates trivy (correctness).
-# validate-quality runs fmt/tidy/vet/lint/govulncheck in parallel.
-# trivy scans go.mod/go.sum (filesystem scan — no image), uploads SARIF to
-# the Security tab, and publishes a CycloneDX SBOM artifact.
-# pr-summary posts a status table on pull_request events.
+# validate-test runs the three suites on the docker-compose stack with -race
+# and the coverage gate, and gates trivy (correctness). validate-quality runs
+# fmt/tidy/vet/lint/arch-lint/docs-check/CI-script tests/govulncheck and the
+# SHA-pinning check. trivy scans go.mod/go.sum (filesystem scan — no image),
+# uploads SARIF to the Security tab and publishes a CycloneDX SBOM artifact.
+# api-compat reports exported-API changes since the last release (warning
+# only; release.yml runs it as a blocking gate). pr-summary posts a status
+# table on pull_request events.
 #
-# "Build image (cache)", "Lint Dockerfile", and "Smoke tests" are no-op
+# `changes` decides whether the expensive jobs run (detect-changes.sh):
+#   - a documentation-only change (any *.md, docs/architecture/*.mmd) skips
+#     them — docs.yml checks those changes instead;
+#   - a draft PR, or a PR labelled "skip-ci", skips them while iterating
+#     (never on push: github.event.pull_request.* exists only on PRs).
+# The workflow itself always runs, and every job behind a required check is
+# skipped by `if:` instead of the whole workflow being filtered out by
+# `paths-ignore` — a workflow that never starts never reports its required
+# checks, which deadlocks docs-only PRs. A skipped job reports success to
+# branch protection. The reusable validate-* workflows get `skip` as an input
+# and skip their inner job themselves: skipping the CALLER job would report
+# only "Validate / Test", never the required "Validate / Test / test".
+#
+# "Build image (cache)", "Lint Dockerfile" and "Smoke tests" are no-op
 # placeholders — they always succeed and exist only so the org branch-
 # protection ruleset resolves. This repo is a pure Go connectors library: no
 # Dockerfile, no deployable image, no runtime to smoke-test (so there is no
@@ -21,14 +39,8 @@
 # repos from org admins when possible; until then, these three stay as
 # documented no-ops.
 #
-# ci-gate: lets a draft PR (or a PR labeled "skip-ci") skip the expensive
-# jobs below while iterating — never applies on push (a merge to main),
-# since github.event.pull_request.* only exists on pull_request events.
-#
-# Every push and pull request runs the full pipeline, including docs-only
-# changes: a workflow-level paths-ignore would skip the whole run, so the
-# required checks ("Validate / Test / test" and the rest) would never report
-# and a docs-only pull request could not merge.
+# Third-party actions are pinned by commit SHA (`# vX.Y.Z`); keep the comment
+# in step when bumping (validate-quality fails on an unpinned action).
 name: CI
 
 "on":
@@ -41,44 +53,118 @@ name: CI
 permissions:
   contents: read
 
+# On a PR, a newer push supersedes the older run (cancelled). On main every
+# push gets its own group (keyed by the commit): GitHub cancels a *pending*
+# run in a group when a newer one queues even with cancel-in-progress false,
+# and a cancelled code commit followed by a docs-only one would never be
+# validated on main.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
-  ci-gate:
-    name: CI gate
+  # ── docs-only detection + the draft / skip-ci gate ───────────────────────
+  changes:
+    name: Detect changes
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     outputs:
-      run: ${{ steps.decide.outputs.run }}
+      code: ${{ steps.detect.outputs.code }}
+      run: ${{ steps.gate.outputs.run }}
     steps:
-      - id: decide
-        run: >
-          echo "run=${{
-            github.event_name != 'pull_request' ||
-            (github.event.pull_request.draft == false &&
-             !contains(github.event.pull_request.labels.*.name, 'skip-ci'))
-          }}" >> "$GITHUB_OUTPUT"
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Detect docs-only change
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/detect-changes.sh
+
+      # run = code changed AND (not a PR, or a ready PR without skip-ci).
+      - name: Draft / skip-ci gate
+        id: gate
+        env:
+          CODE: ${{ steps.detect.outputs.code }}
+          READY: >-
+            ${{ github.event_name != 'pull_request' ||
+                (github.event.pull_request.draft == false &&
+                 !contains(github.event.pull_request.labels.*.name, 'skip-ci')) }}
+        run: |
+          run=false
+          if [ "$CODE" = true ] && [ "$READY" = true ]; then run=true; fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          if [ "$READY" != true ]; then
+            echo "Draft PR or skip-ci label — build/test jobs are skipped."
+          fi
 
   # ── runs in parallel with validate-quality ───────────────────────────────
+  # Not skipped here (see the header): the reusable workflow skips its job.
   validate-test:
     name: Validate / Test
-    needs: [ci-gate]
-    if: needs.ci-gate.outputs.run == 'true'
+    needs: changes
     uses: ./.github/workflows/validate-test.yml
-    secrets: inherit
+    with:
+      skip: ${{ needs.changes.outputs.run != 'true' }}
+    # Only the secrets validate-test.yml declares (no `secrets: inherit`).
+    secrets:
+      GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+      CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
 
   # ── runs in parallel with validate-test ──────────────────────────────────
   validate-quality:
     name: Validate / Quality
-    needs: [ci-gate]
-    if: needs.ci-gate.outputs.run == 'true'
+    needs: changes
     uses: ./.github/workflows/validate-quality.yml
-    secrets: inherit
+    with:
+      skip: ${{ needs.changes.outputs.run != 'true' }}
+    secrets:
+      GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+      CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
+
+  # ── informational: exported-API changes since the last release ──────────
+  # Warns (never fails) on an incompatible change: the next version is
+  # decided at release time, where release.yml runs the same check blocking.
+  api-compat:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # apidiff loads both trees' packages, so private modules must resolve.
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: API changes since the last release (apidiff)
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: make api-compat
 
   # Placeholder: no Dockerfile exists in this repo. See header comment.
   build-image-cache:
@@ -113,8 +199,8 @@ jobs:
   trivy:
     name: Trivy CVE scan
     runs-on: ubuntu-latest
-    needs: [ci-gate, validate-test]
-    if: needs.ci-gate.outputs.run == 'true'
+    needs: [changes, validate-test]
+    if: needs.changes.outputs.run == 'true'
     timeout-minutes: 15
     permissions:
       contents: read
@@ -202,7 +288,7 @@ jobs:
   pr-summary:
     name: PR summary
     runs-on: ubuntu-latest
-    needs: [ci-gate, validate-test, validate-quality, trivy, build-image-cache, lint-dockerfile, smoke-tests]
+    needs: [changes, validate-test, validate-quality, api-compat, trivy, build-image-cache, lint-dockerfile, smoke-tests]
     if: always() && github.event_name == 'pull_request'
     timeout-minutes: 5
     permissions:
@@ -219,7 +305,8 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          CI_SKIPPED: ${{ needs.ci-gate.outputs.run != 'true' }}
+          CI_SKIPPED: ${{ needs.changes.outputs.run != 'true' }}
+          DOCS_ONLY: ${{ needs.changes.outputs.code != 'true' }}
         with:
           script: |
             const fs = require('fs')

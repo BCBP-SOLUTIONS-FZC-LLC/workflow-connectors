@@ -31,5 +31,20 @@ Consumers move between major versions by changing their import paths (`…/workf
 1. Merge to `main`. Release tags are cut from `main`, never from a feature branch.
 2. Move `[Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md`.
 3. `make ci` locally.
-4. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`. The release workflow (`release.yml`) refuses a tag that does not point at a commit on `origin/main` or whose major version does not match the module path's `/vN` suffix (`.github/scripts/verify-release-tag.sh`), and one with no `## [X.Y.Z]` section in `CHANGELOG.md` (`verify-changelog-entry.sh`). It re-runs the test and quality gates at the tag, scans dependencies with Trivy and publishes a GitHub Release with the changelog section, a source archive, a CycloneDX SBOM and `checksums.txt`.
+4. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`. The release workflow (`release.yml`) first runs **verify**: it refuses a manual dispatch from any ref but `main` or the tag, a tag that does not point at a commit on `origin/main`, one whose major version does not match the module path's `/vN` suffix (`.github/scripts/verify-release-tag.sh`), and one with no `## [X.Y.Z]` section in `CHANGELOG.md` (`verify-changelog-entry.sh`; a prerelease such as `vX.Y.Z-rc.1` may use the `## [X.Y.Z]` section). It then re-runs the test and quality gates at the tag, runs the **blocking API-compatibility check** (`make api-compat API_NEW_VERSION=vX.Y.Z`: a MINOR or PATCH release fails on an incompatible exported-API change — run it locally before tagging), scans dependencies with Trivy, and publishes a GitHub Release with the changelog section, a source archive, a CycloneDX SBOM and a Cosign-signed `checksums.txt`.
 5. Notify `definition_service` and `execution_service` owners if MINOR or MAJOR.
+
+## Verifying a release
+
+Each GitHub Release carries `workflow-connectors_vX.Y.Z_source.tar.gz` (the tree the Go module proxy serves for the tag), `sbom.cyclonedx.json`, `checksums.txt` over both, and `checksums.txt.sigstore.json` — a Cosign keyless signature made by `release.yml` at the tag. To verify:
+
+```bash
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/\.github/workflows/release\.yml@refs/(tags/v.+|heads/main)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --check checksums.txt
+```
+
+Consumers who only `go get` the module are already protected by the Go checksum database for public modules; for this private module (`GONOSUMDB`), pin the tag and compare `go.sum` across environments, or verify the source archive above.

@@ -29,6 +29,8 @@ make fmt / fmt-check   # gofmt -w / verify (mirrors CI)
 make vet / make lint   # default build + a second pass with every test build tag (ALL_TEST_TAGS = integration)
 make arch-lint         # go-arch-lint against .go-arch-lint.yml (.github/scripts/arch-lint.sh, same as CI)
 make docs-check        # ARCHITECTURE.md mermaid blocks identical to docs/architecture/mermaid/*.mmd (same as CI)
+make ci-scripts-test   # detect-changes.sh regression tests (scratch git repos; same as CI)
+make api-compat        # apidiff vs the last stable tag (warns); API_NEW_VERSION=vX.Y.Z fails unless compatible or a major bump
 make test-unit         # ./test/unit/... + ./pkg/... (white-box), no Docker
 make test-postgres     # docker-up, then ./test/postgres/... + ./pkg/connectors/storage/googledrive/... with -tags=integration
 make test-integration  # docker-up, then ./test/integration/... with -tags=integration (Valkey, floci S3, PostgreSQL)
@@ -37,7 +39,7 @@ make test-ci           # docker-up, three suites with -race + per-suite coverage
 make race              # docker-up, the three suites with -race (the test-ci internals, without the merge)
 make cover / cover-func  # test-ci, then the HTML report / per-function summary
 make build             # go build ./... (compile check; there is nothing to ship)
-make ci                # tidy-check + fmt-check + vet + lint + arch-lint + docs-check + test-ci + build
+make ci                # tidy-check + fmt-check + vet + lint + arch-lint + docs-check + ci-scripts-test + test-ci + build
 make docker-up / docker-down   # docker-compose.yml stack (postgres, pgbouncer, valkey, floci); down deletes the volumes
 make mod-verify / vuln-check (govulncheck v1.1.4 on ./pkg/...) / godoc (pkgsite on :8080) / install-hooks / clean
 ```

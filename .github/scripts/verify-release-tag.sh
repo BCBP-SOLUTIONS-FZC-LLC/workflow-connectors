@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Ensures checked-out HEAD is RELEASE_TAG's commit (exact tag, not branch
-# tip), that the commit is on the release branch (origin/main, or
+# Release front gate (release.yml's verify job). Ensures a workflow_dispatch
+# was started from the release branch or from refs/tags/RELEASE_TAG — GitHub
+# runs release.yml and the reusable validate workflows from the *dispatching*
+# ref, so a dispatch from a feature branch would release the tag with that
+# branch's unreviewed pipeline — that the checked-out HEAD is RELEASE_TAG's
+# commit (exact tag, not branch tip), that the commit is on the release branch (origin/main, or
 # origin/$RELEASE_BRANCH) so a tag pushed on an unreviewed branch is never
 # released, and that the tag's major version matches the module path: Go
 # requires a /vN suffix for v2 and later, so a v2+ tag on a path without it
@@ -12,6 +16,19 @@ set -euo pipefail
 
 : "${RELEASE_TAG:?RELEASE_TAG is required}"
 release_branch="${RELEASE_BRANCH:-main}"
+
+# Dispatch ref (GITHUB_EVENT_NAME / GITHUB_REF are set by the runner).
+if [ "${GITHUB_EVENT_NAME:-push}" = "workflow_dispatch" ]; then
+  case "${GITHUB_REF:-}" in
+    "refs/heads/${release_branch}" | "refs/tags/${RELEASE_TAG}")
+      echo "  ✔  dispatched from ${GITHUB_REF}"
+      ;;
+    *)
+      echo "::error title=Dispatch ref::workflow_dispatch from '${GITHUB_REF:-}' is refused — the release workflow and its reusable validate workflows would run from that ref, not from ${RELEASE_TAG}. Re-run with 'Use workflow from' set to ${release_branch} or to the tag ${RELEASE_TAG}."
+      exit 1
+      ;;
+  esac
+fi
 
 # Every tag on HEAD, not just the one git describe happens to pick when
 # several tags point at the same commit. Captured first: with pipefail,

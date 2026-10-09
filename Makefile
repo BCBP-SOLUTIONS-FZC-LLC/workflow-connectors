@@ -112,6 +112,8 @@ help:
 	@echo "  make lint            - run golangci-lint (default build + every test build tag)"
 	@echo "  make arch-lint       - run go-arch-lint against .go-arch-lint.yml"
 	@echo "  make docs-check      - ARCHITECTURE.md diagrams identical to docs/architecture/mermaid/*.mmd"
+	@echo "  make ci-scripts-test - regression tests for the CI scripts (detect-changes.sh)"
+	@echo "  make api-compat      - apidiff vs the last release tag (API_NEW_VERSION=vX.Y.Z: fail unless compatible or a major bump)"
 	@echo "  make test            - unit + postgres + integration tests (requires Docker)"
 	@echo "  make test-ci         - test with race detector + coverage (used in CI)"
 	@echo "  make test-unit       - unit tests only (no Docker required)"
@@ -121,7 +123,7 @@ help:
 	@echo "  make build           - compile-check all packages"
 	@echo "  make cover           - coverage HTML report"
 	@echo "  make cover-func      - coverage summary by function"
-	@echo "  make ci              - tidy-check + fmt-check + vet + lint + arch-lint + docs-check + test-ci + build"
+	@echo "  make ci              - tidy-check + fmt-check + vet + lint + arch-lint + docs-check + ci-scripts-test + test-ci + build"
 	@echo "  make docker-up       - start docker-compose.yml (postgres, pgbouncer, valkey, floci) and wait until healthy"
 	@echo "  make docker-down     - stop local containers and delete their volumes"
 	@echo "  make mod-verify      - go mod verify"
@@ -196,6 +198,24 @@ arch-lint:
 .PHONY: docs-check
 docs-check:
 	python3 scripts/docs_check.py
+
+# ci-scripts-test: regression tests for the CI shell scripts (no bats; scratch
+# git repositories): detect-changes.sh's docs-only decision and log
+# sanitising. validate-quality.yml runs the same target. No Docker.
+.PHONY: ci-scripts-test
+ci-scripts-test:
+	bash .github/scripts/detect-changes_test.sh
+
+# api-compat: exported-API diff (golang.org/x/exp/cmd/apidiff, pinned; x/exp
+# has no tags) of the module against the previous stable release tag.
+# Without API_NEW_VERSION it only warns (CI); with API_NEW_VERSION=vX.Y.Z it
+# fails on an incompatible change unless vX.Y.Z bumps the major (release.yml).
+APIDIFF_VERSION ?= v0.0.0-20260908205506-85c1c2202aba
+API_NEW_VERSION ?=
+
+.PHONY: api-compat
+api-compat:
+	APIDIFF_VERSION=$(APIDIFF_VERSION) bash .github/scripts/api-compat.sh $(API_NEW_VERSION)
 
 # -----------------------------
 # TESTS
@@ -303,7 +323,7 @@ docker-down:
 # -----------------------------
 
 .PHONY: ci
-ci: tidy-check fmt-check vet lint arch-lint docs-check test-ci build
+ci: tidy-check fmt-check vet lint arch-lint docs-check ci-scripts-test test-ci build
 
 # -----------------------------
 # COVERAGE

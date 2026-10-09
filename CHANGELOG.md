@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI and release pipeline follow platform-pgcommon's structure** (scoped to a library with no image).
+  - **`ci.yml`:** a `changes` job (`detect-changes.sh`) skips the build/test jobs on a documentation-only change, a draft PR or the `skip-ci` label. The reusable validate workflows take a `skip` input, so the required checks still report.
+  - **API compatibility in CI:** an informational job runs apidiff (`make api-compat`) against the last stable tag.
+  - **Validate workflows:** they declare their secrets (`GO_PRIVATE_TOKEN`, `CI_REPO_READ_TOKEN`) and callers pass them explicitly instead of using `secrets: inherit`.
+  - **New `docs.yml`:** checks the architecture diagrams on docs changes.
+  - **`release.yml`:** gains a **verify** job (dispatch only from `main` or the tag; tag, `main` and `/vN` checks; CHANGELOG section, which a prerelease may share with its base version via `changelog-section.sh`) and a **blocking API-compatibility gate**, so a non-major release fails on an incompatible exported-API change. It now signs `checksums.txt` with Cosign keyless (`checksums.txt.sigstore.json`); VERSIONING.md *Verifying a release* has the commands.
+  - **New Make targets:** `make ci-scripts-test` (22 `detect-changes.sh` cases, also in `make ci` and validate-quality) and `make api-compat`.
 - **Breaking: removed the class sentinels.** `connectors.ErrTransient` and `connectors.ErrPermanent` are gone, along with `shared.ErrTransient`, `shared.ErrPermanent` and `ClassifiedError.Is`. `errors.Is` could disagree with `ClassOf`, for example on invalid input that wraps a transient cause. Use `connectors.ClassOf`, `IsTransient`, `IsPermanent` or `DecideRetry` instead.
 - **Breaking: JSON numbers are decoded exactly.** `rest-call` and `sql-query` decode JSON numbers as `json.Number` instead of `float64`, so integers above 2^53 keep every digit. `shared.StringField` and `StringSliceField` accept `json.Number`.
 - **Breaking: two `shared` helpers changed.** `shared.ApplyQueryParams` now returns an error, and `shared.DepartmentsFromContext` reports ok only for a non-empty, valid list.
