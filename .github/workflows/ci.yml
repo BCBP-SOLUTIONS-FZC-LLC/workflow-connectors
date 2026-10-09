@@ -3,11 +3,14 @@
 # Same structure as platform-pgcommon's ci.yml, scoped to a library that
 # builds no image. Parallel flow (every job below needs `changes`):
 #
-#   changes ──┬─► validate-test ──► trivy ──┐
-#             ├─► validate-quality ─────────┤──► pr-summary (PR events only)
-#             └─► api-compat (informational)│
-#   build-image-cache · lint-dockerfile ·   │
-#   smoke-tests (no-op placeholders) ───────┘
+#   changes ──┬─► validate-test ──────┬──► trivy ─────┐
+#             ├─► build-image-cache* ─┘    smoke* ────┤──► pr-summary (PR events only)
+#             ├─► validate-quality ───────────────────┤
+#             ├─► lint-dockerfile* ───────────────────┤
+#             └─► api-compat (informational) ─────────┘
+#
+#   * no-op placeholders (see below). trivy and smoke need validate-test and
+#     build-image, exactly as in platform-pgcommon's ci.yml.
 #
 # validate-test runs the three suites on the docker-compose stack with -race
 # and the coverage gate, and gates trivy (correctness). validate-quality runs
@@ -166,40 +169,52 @@ jobs:
           GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
         run: make api-compat
 
-  # Placeholder: no Dockerfile exists in this repo. See header comment.
+  # ── runs in parallel with validate-test + validate-quality ───────────────
+  # Placeholder: no Dockerfile exists in this repo. See header comment. Wired
+  # where platform-pgcommon's image build sits (needs `changes`, gates trivy
+  # and smoke), so the two pipelines have the same shape.
   build-image-cache:
     name: Build image (cache)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     timeout-minutes: 2
     steps:
       - name: No-op placeholder
         run: echo "workflow-connectors has no Dockerfile/service image — placeholder to satisfy the org branch-protection ruleset. Request a Dockerfile-less-repo exemption when possible."
 
   # Placeholder: no Dockerfile exists in this repo. See header comment.
+  # (platform-pgcommon lints its Dockerfile as the first steps of its image
+  # build; the org ruleset's "Lint Dockerfile" check is kept as its own job.)
   lint-dockerfile:
     name: Lint Dockerfile
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     timeout-minutes: 2
     steps:
       - name: No-op placeholder
         run: echo "workflow-connectors has no Dockerfile — placeholder to satisfy the org branch-protection ruleset. Request a Dockerfile-less-repo exemption when possible."
 
+  # ── gates on validate-test + build-image, runs in parallel with trivy ────
   # Placeholder: no genuine runtime/service surface exists in this repo to
   # smoke-test — it's a library consumed by execution_service's connector
   # worker, not a standalone deployable.
   smoke-tests:
     name: Smoke tests
     runs-on: ubuntu-latest
+    needs: [changes, validate-test, build-image-cache]
+    if: needs.changes.outputs.run == 'true'
     timeout-minutes: 2
     steps:
       - name: No-op placeholder
         run: echo "workflow-connectors is a library with no runtime to smoke-test — placeholder to satisfy the org branch-protection ruleset. Request a Dockerfile-less-repo exemption when possible."
 
-  # ── gates on validate-test ───────────────────────────────────────────────
+  # ── gates on validate-test + build-image, runs in parallel with smoke ────
   trivy:
     name: Trivy CVE scan
     runs-on: ubuntu-latest
-    needs: [changes, validate-test]
+    needs: [changes, validate-test, build-image-cache]
     if: needs.changes.outputs.run == 'true'
     timeout-minutes: 15
     permissions:
