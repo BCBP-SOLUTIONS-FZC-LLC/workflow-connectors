@@ -51,6 +51,10 @@ name: CI
     branches: [main]
   pull_request:
     branches: [main]
+    # The defaults (opened, synchronize, reopened) plus the events that open
+    # the draft / skip-ci gate: marking a draft ready and removing the
+    # skip-ci label must start the full pipeline without a new push.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
