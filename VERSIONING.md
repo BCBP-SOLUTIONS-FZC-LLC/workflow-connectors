@@ -36,7 +36,7 @@ Consumers move between major versions by changing their import paths (`…/workf
 
 ## Verifying a release
 
-Each GitHub Release carries `workflow-connectors_vX.Y.Z_source.tar.gz` (the tree the Go module proxy serves for the tag), `sbom.cyclonedx.json`, `checksums.txt` over both, and `checksums.txt.sigstore.json` — a Cosign keyless signature made by `release.yml` at the tag. To verify:
+Each GitHub Release carries `workflow-connectors_vX.Y.Z_source.tar.gz` (the tree the Go module proxy serves for the tag), `sbom.cyclonedx.json`, `checksums.txt` over both, and `checksums.txt.sigstore.json` — a Cosign keyless signature made by `release.yml` at the tag. Verifying needs **Cosign v3** (the release signs with v3.0.6, whose Sigstore bundle format Cosign 2.x cannot read: it fails with "bundle does not contain cert for verification"). To verify:
 
 ```bash
 cosign verify-blob \
