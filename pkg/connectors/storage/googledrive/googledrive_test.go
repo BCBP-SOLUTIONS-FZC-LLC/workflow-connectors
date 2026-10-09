@@ -202,8 +202,11 @@ func TestDrive_CrashAfterDriveCreate_RetryAdoptsFileInsteadOfDuplicating(t *test
 		identity := documents.Identity{TenantID: tenant, Provider: providerName, Container: folder, Filename: "c.txt"}
 
 		// A worker claimed the document, created the Drive file, and died
-		// before recording it. Its short lease then expires.
-		doc, claimed, err := store.Claim(ctx, identity, "crashed-attempt", 50*time.Millisecond)
+		// before recording it. Its short lease then expires. The lease must
+		// outlast the steps that expect it live, even under -race on CI.
+		const lease = time.Second
+		start := time.Now()
+		doc, claimed, err := store.Claim(ctx, identity, "crashed-attempt", lease)
 		require.NoError(t, err)
 		require.True(t, claimed)
 		_, err = store.Advance(ctx, doc.ID, "crashed-attempt", documents.StateUploading)
@@ -214,7 +217,7 @@ func TestDrive_CrashAfterDriveCreate_RetryAdoptsFileInsteadOfDuplicating(t *test
 		assert.ErrorIs(t, c.Upload(ctx, folder, "c.txt", []byte("full"), "text/plain"), documents.ErrUploadInProgress,
 			"a live lease still protects the document")
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Until(start.Add(lease + 250*time.Millisecond)))
 		require.NoError(t, c.Upload(ctx, folder, "c.txt", []byte("full"), "text/plain"))
 
 		got := getDoc(t, ctx, store, "c.txt")
