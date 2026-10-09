@@ -63,7 +63,7 @@ Required checks: "Validate / Test / test" and "Validate / Quality / quality" (jo
 
 ### 3.2 Release state
 
-**v2.0.0** is the current release (2026-10-10, module path `…/workflow-connectors/v2`); v1.0.0 (2026-10-09) and `v0.1.0-beta.1` precede it. New changes collect under `CHANGELOG.md` `[Unreleased]`. Process (`VERSIONING.md`): merge to `main` → move `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` → `make ci` → `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → notify `definition_service` and `execution_service` owners for MINOR / MAJOR. Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@vX.Y.Z` with `GOPRIVATE` set. There is no image or binary; the GitHub Release carries a source archive, the SBOM and a Cosign-signed `checksums.txt` (`VERSIONING.md` *Verifying a release*).
+**v2.0.0** is the current release (2026-10-10, module path `…/workflow-connectors/v2`; tag on `f392b27`, moved once from `7e3d826` because the first release run hit Docker Hub's pull rate limit — never move a tag again); v1.0.0 (2026-10-09) and `v0.1.0-beta.1` precede it. New changes collect under `CHANGELOG.md` `[Unreleased]`. Process (`VERSIONING.md`): merge to `main` → move `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` → `make ci` → `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → notify `definition_service` and `execution_service` owners for MINOR / MAJOR. Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@vX.Y.Z` with `GOPRIVATE` set. There is no image or binary; the GitHub Release carries a source archive, the SBOM and a Cosign-signed `checksums.txt` (`VERSIONING.md` *Verifying a release*).
 
 ## 4. Testing Strategy
 
