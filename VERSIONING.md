@@ -12,10 +12,10 @@ Go module, versioned via Git tags per [SemVer 2.0.0](https://semver.org/). `pkg/
 
 | Version | Status | Module path |
 |---|---|---|
-| **v2.0.0** | **Unreleased** — the changes under `[Unreleased]` in `CHANGELOG.md`; not tagged yet | `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2` |
-| v1.0.0 | Latest tag (2026-10-09); not supported (see `SECURITY.md`) | `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors` |
+| **v2.0.0** | **Current** — released 2026-10-10 (`CHANGELOG.md` `[2.0.0]`) | `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2` |
+| v1.0.0 | Released 2026-10-09; not supported (see `SECURITY.md`) | `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors` |
 
-Until v2.0.0 is tagged, no `/v2` version can be fetched through the module proxy. When it is, the `[Unreleased]` section becomes `## [2.0.0] - YYYY-MM-DD` (step 2 below).
+Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@v2.0.0` with `GOPRIVATE` set. The next release is v2.0.1 for fixes and v2.1.0 for backward-compatible features; changes since v2.0.0 collect under `[Unreleased]`.
 
 ## Consume a release
 
