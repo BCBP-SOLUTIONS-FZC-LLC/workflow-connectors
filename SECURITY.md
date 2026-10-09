@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 2.x     | ✅ Active — latest v2.0.0 (2026-10-10; status in `VERSIONING.md`) |
-| 1.x     | ❌ Not supported — v1.0.0 has the defects fixed in 2.0.0 (SendGrid message mix-up under concurrency, SSRF through tenant credentials); upgrade to v2.0.0 |
+| 2.x     | ✅ Active — latest v2.0.1 (2026-10-10; status in `VERSIONING.md`) |
+| 1.x     | ❌ Not supported — v1.0.0 has the defects fixed in 2.0.0 (SendGrid message mix-up under concurrency, SSRF through tenant credentials); upgrade to v2.0.1 |
 
 Older major versions are not patched. Once v2.0.0 is tagged, consumers should pin the latest 2.x tag (module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`).
 

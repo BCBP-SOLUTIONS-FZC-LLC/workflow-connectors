@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-10
+
+A CI and release-pipeline release: the library code is unchanged from v2.0.0. The `v2.0.0` tag is a valid module version (`go get …/v2@v2.0.0` works), but its release run could not publish a GitHub Release because of Docker Hub's anonymous pull rate limit (below). v2.0.1 is the first version with a signed GitHub Release; prefer it.
+
 ### Changed
 
 - **The release job graph matches platform-pgcommon's.** It adds "Build image (cache)" and "Smoke tests" as placeholders (as in `ci.yml`), wired where pgcommon's image jobs sit. Trivy now waits for both test and image, as in CI. A **Build source archive** job (`build-source-archive.sh`), the counterpart of pgcommon's "Build binaries", runs after both validation gates. The publish job re-checks the archive against its `.sha256` before signing `checksums.txt`.
