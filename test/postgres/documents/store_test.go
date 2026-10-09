@@ -201,7 +201,11 @@ func TestStore_TransitionsRequireOwnership(t *testing.T) {
 func TestStore_LiveLeaseBlocks_ExpiredLeaseIsTakenOver(t *testing.T) {
 	forEach(t, func(t *testing.T, sc storeCase) {
 		ctx, identity := context.Background(), newIdentity()
-		doc, _, err := sc.store.Claim(ctx, identity, "crashed", 50*time.Millisecond)
+		// The lease must outlast the blocked claim below even under -race and
+		// parallel suites (50 ms did not, on CI); then wait it out.
+		const lease = time.Second
+		start := time.Now()
+		doc, _, err := sc.store.Claim(ctx, identity, "crashed", lease)
 		require.NoError(t, err)
 
 		blocked, claimed, err := sc.store.Claim(ctx, identity, "second", time.Minute)
@@ -209,7 +213,7 @@ func TestStore_LiveLeaseBlocks_ExpiredLeaseIsTakenOver(t *testing.T) {
 		assert.False(t, claimed)
 		assert.Equal(t, doc.ID, blocked.ID)
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Until(start.Add(lease + 250*time.Millisecond)))
 		taken, claimed, err := sc.store.Claim(ctx, identity, "second", time.Minute)
 		require.NoError(t, err)
 		assert.True(t, claimed, "an expired lease is claimable")

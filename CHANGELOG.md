@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lease tests no longer race the clock.** `TestStore_LiveLeaseBlocks_ExpiredLeaseIsTakenOver` and `TestDrive_CrashAfterDriveCreate_RetryAdoptsFileInsteadOfDuplicating` used a 50 ms lease and assumed the follow-up calls ran before it expired. Under `-race` and the parallel suites on CI they did not, and the v2.0.0 release run failed once on it. Both now use a 1 s lease and wait until just past its deadline. Test-only; the store behaved correctly.
+
 ## [2.0.0] - 2026-10-10
 
 A new major version (tag moved on 2026-10-10 from `7e3d826` to `f392b27` to include the CI fixes under **Fixed**: the first release run could not pull its test images; the library code is identical) at module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`: consumers change their imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`. Read **Changed** for every breaking change, and [`docs/integration/connector-worker.md`](docs/integration/connector-worker.md) for wiring the worker (platform-pgcommon v2.0.1+, both `ApplySchema` migrations, `DocRefs`, `SendIntents`, `DecideRetry`).
