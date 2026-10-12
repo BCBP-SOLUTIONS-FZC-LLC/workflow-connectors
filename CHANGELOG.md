@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- LLD rev 1.18: `execution_service` runs the connector worker on this module's `v2.0.0` (OQ-14 and OQ-17 closed), the dropped open questions are struck through for future reference, the removed `call_pool` task is gone from §S5, and the Workflow team's sign-off is recorded in §16.1. No code or API change.
+
 ## [2.0.0] - 2026-10-10
 
 A new major version (released from `5ef76fa`; the tag was moved from `7e3d826` and then `f392b27` to include the CI and test fixes under **Fixed** — the library code is identical across all three; refresh `go.sum` if you fetched an earlier one) at module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`: consumers change their imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`. Read **Changed** for every breaking change, and [`docs/integration/connector-worker.md`](docs/integration/connector-worker.md) for wiring the worker (platform-pgcommon v2.0.1+, both `ApplySchema` migrations, `DocRefs`, `SendIntents`, `DecideRetry`).

@@ -1,6 +1,6 @@
 # Wiring workflow-connectors into a connector worker
 
-This guide is for the team that runs the library: `execution_service`'s `cmd/connector-worker` (LLD OQ-14 and OQ-17). It lists everything the worker must provide, in the order to do it. The library reads no configuration, opens no connection and runs no background work of its own: every item below is the worker's job.
+This guide is for the team that runs the library. `execution_service`'s `cmd/connector-worker` follows it (LLD OQ-14 and OQ-17, closed). It lists everything the worker must provide, in the order to do it. The library reads no configuration, opens no connection and runs no background work of its own: every item below is the worker's job.
 
 `workflow-definition-service` needs only `pkg/registry` (README, *Definition Service — compile side*); nothing in this guide applies to it.
 
@@ -29,7 +29,7 @@ go mod tidy
 ```
 
 - **Go 1.26.9 or newer.** This module's `go` directive is `1.26.9` (standard-library security fixes), so the worker's `go.mod` must say at least that.
-- **platform-pgcommon v2 (v2.0.1 or newer).** The document registry and send-intent stores take a `*pgcommon.Pool` from v2. `execution_service` is on v1 today: move it first. v2.0.1 is the minimum: the stores rely on its transaction timeouts.
+- **platform-pgcommon v2 (v2.0.1 or newer).** The document registry and send-intent stores take a `*pgcommon.Pool` from v2. `execution_service` is on v2.0.1. v2.0.1 is the minimum: the stores rely on its transaction timeouts.
 - **Import path `…/workflow-connectors/v2/pkg/…`.** v1.0.0 import paths have no `/v2` and do not compile against v2.
 - **Private modules in CI and Docker builds.** Both modules are private: the worker's image build needs a token for `github.com/BCBP-SOLUTIONS-FZC-LLC` (for example a `GO_PRIVATE_TOKEN` build secret, as the IAM services use).
 
