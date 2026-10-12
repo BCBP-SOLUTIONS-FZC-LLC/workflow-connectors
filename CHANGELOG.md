@@ -7,13 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Lease tests no longer race the clock.** `TestStore_LiveLeaseBlocks_ExpiredLeaseIsTakenOver` and `TestDrive_CrashAfterDriveCreate_RetryAdoptsFileInsteadOfDuplicating` used a 50 ms lease and assumed the follow-up calls ran before it expired. Under `-race` and the parallel suites on CI they did not, and the v2.0.0 release run failed once on it. Both now use a 1 s lease and wait until just past its deadline. Test-only; the store behaved correctly.
-
 ## [2.0.0] - 2026-10-10
 
-A new major version (tag moved on 2026-10-10 from `7e3d826` to `f392b27` to include the CI fixes under **Fixed**: the first release run could not pull its test images; the library code is identical) at module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`: consumers change their imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`. Read **Changed** for every breaking change, and [`docs/integration/connector-worker.md`](docs/integration/connector-worker.md) for wiring the worker (platform-pgcommon v2.0.1+, both `ApplySchema` migrations, `DocRefs`, `SendIntents`, `DecideRetry`).
+A new major version (released from `5ef76fa`; the tag was moved from `7e3d826` and then `f392b27` to include the CI and test fixes under **Fixed** — the library code is identical across all three; refresh `go.sum` if you fetched an earlier one) at module path `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`: consumers change their imports from `…/workflow-connectors/pkg/…` to `…/workflow-connectors/v2/pkg/…`. Read **Changed** for every breaking change, and [`docs/integration/connector-worker.md`](docs/integration/connector-worker.md) for wiring the worker (platform-pgcommon v2.0.1+, both `ApplySchema` migrations, `DocRefs`, `SendIntents`, `DecideRetry`).
 
 ### Security
 
@@ -136,6 +132,7 @@ A new major version (tag moved on 2026-10-10 from `7e3d826` to `f392b27` to incl
 
 ### Fixed
 
+- **Lease tests no longer race the clock.** `TestStore_LiveLeaseBlocks_ExpiredLeaseIsTakenOver` and `TestDrive_CrashAfterDriveCreate_RetryAdoptsFileInsteadOfDuplicating` used a 50 ms lease and assumed the follow-up calls ran before it expired. Under `-race` and the parallel suites on CI they did not, and the v2.0.0 release run failed once on it. Both now use a 1 s lease and wait until just past its deadline. Test-only; the store behaved correctly.
 - **CI and release no longer fail on Docker Hub's anonymous pull rate limit.** The v2.0.0 release run failed on it before any test ran. The compose images and the Valkey restart tests' containers now come from `WC_REGISTRY` (default `docker.io`; CI uses `mirror.gcr.io`, Google's Docker Hub mirror, with the same digests), and `validate-test.yml` pulls them with retries before starting the stack.
 - **Registry covers every field the connectors use.** `storage` gains the `contentType` input (upload; it defaults to a ref's own content type), and `send-email` gains the `sendIntentWarning` output (set when the outcome could not be recorded). The connectors already read and returned both, but definition_service validates authored workflows against the registry, so neither could be authored or mapped. A registry test pins both.
 - **A `rest-call` error status is classified by the status alone.** An oversized or cut-off error body no longer turns a transient 503 into a permanent `ErrValidation` or upstream read error.
