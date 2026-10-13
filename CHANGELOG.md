@@ -67,6 +67,8 @@ Production-readiness fixes from a review of the whole library. New exported API 
 
 ### Fixed
 
+- **`TestStore_ConcurrentClaimAndRemoveCycles_NeverTwoRows` no longer fails on a busy runner.** Eight goroutines claiming and removing one Drive document can make a claim give up with the documented transient "claim contention" error (the worker retries it); the test now accepts that error and still asserts the real invariant, never two rows. Test-only; it failed the first CI run on `main` after PR #8.
+
 - **A database outage or a full pool no longer makes every send-email with a `messageKey` "unknown".** `sqlstore.Reserve` marks every failure before COMMIT was sent as `sendintent.ErrNotReserved` (no connection, BEGIN, transaction setup, the statement), so such a failure is a transient `not_delivered` that is retried. Only a failed or lost COMMIT stays ambiguous.
 - **send-email bounds the time between reserving an intent and calling the provider** to 11 min 50 s: a call past it sends nothing and records `not_delivered` (transient), so an intent can never become stale and resendable while its send may still be in flight.
 - **send-email records the outcome even when an error's `Error()` panics**, and a panic before the outcome is recorded is recorded by the panic guard.

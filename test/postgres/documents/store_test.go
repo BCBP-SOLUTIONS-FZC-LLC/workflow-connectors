@@ -18,6 +18,7 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/documents"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/documents/sqlstore"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/shared"
 )
 
 // The contract suite runs against the in-memory store always and against
@@ -253,7 +254,16 @@ func TestStore_ConcurrentClaimAndRemoveCycles_NeverTwoRows(t *testing.T) {
 				for i := range 40 {
 					attempt := uuid.NewString()
 					doc, claimed, err := sc.store.Claim(ctx, identity, attempt, time.Minute)
-					if !assert.NoError(t, err) || !claimed {
+					if err != nil {
+						// Under this much churn a claim can keep finding the
+						// row deleted between its insert and its read-back;
+						// after claimRetries it gives up with a transient
+						// "claim contention" error the worker retries. Any
+						// other error is a failure.
+						assert.Truef(t, shared.IsTransient(err), "only claim contention may fail a claim: %v", err)
+						continue
+					}
+					if !claimed {
 						continue
 					}
 					if i%2 == 0 {
