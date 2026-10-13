@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/aliasconfig"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/docref"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/sendemail"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/sendintent"
@@ -209,4 +213,126 @@ func TestWorker_UnrecordedIntent_NotRetried(t *testing.T) {
 	assert.Equal(t, connectors.ClassUnknown, d.Class)
 	assert.Contains(t, d.Reason, "send intent not recorded")
 	assert.Contains(t, last(attempts).out["sendIntentWarning"], "outcome not recorded")
+}
+
+// WS-12 (a google-drive fetch after a crashed upload whose lease expired)
+// needs the Drive adapter's unexported fake and lives in
+// pkg/connectors/storage/googledrive/facade_test.go.
+
+// runRestCallTask is runTask for rest-call as the worker runs it: the method
+// passed to DecideRetry is the "method" field of Execute's output (set once
+// the request was sent), not re-resolved from the alias.
+func runRestCallTask(ctx context.Context, conn connectors.Connector, input map[string]any, maxAttempts int) []attempt {
+	var attempts []attempt
+	for range maxAttempts {
+		out, err := conn.Execute(ctx, input)
+		a := attempt{out: out, err: err}
+		if err != nil {
+			method, _ := out["method"].(string)
+			a.decision = connectors.DecideRetry(conn.Type(), err, method)
+		}
+		attempts = append(attempts, a)
+		if err == nil || !a.decision.Retry {
+			break
+		}
+	}
+	return attempts
+}
+
+// flakyService answers 503 to its first `failures` requests, then 200.
+func flakyService(t *testing.T, failures int32) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) <= failures {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// WS-10: the worker decides a rest-call retry from the output's "method": a
+// 503 on a GET alias is retried until it succeeds; the same 503 on a POST
+// alias is not (the service may have acted on it).
+func TestWorker_RestCall503_DecidedByOutputMethod(t *testing.T) {
+	t.Parallel()
+	ctx := connectors.WithDepartments(context.Background(), []string{"dept:reviewer"})
+	for method, want := range map[string]struct {
+		attempts int
+		ok       bool
+		rule     string
+	}{
+		http.MethodGet:  {attempts: 3, ok: true, rule: "transient"},
+		http.MethodPost: {attempts: 1, ok: false, rule: "non-idempotent method"},
+	} {
+		srv, hits := flakyService(t, 2)
+		all, err := connectors.New(connectors.Config{
+			InternalToken: "test-token",
+			Aliases:       aliasconfig.Config{RestCall: []aliasconfig.Endpoint{{Alias: "svc", Method: method, BaseURL: srv.URL, PathTemplate: "/x"}}},
+		})
+		require.NoError(t, err)
+
+		attempts := runRestCallTask(ctx, all[registry.TypeRestCall], map[string]any{"endpointAlias": "svc"}, maxAttempts)
+
+		require.Len(t, attempts, want.attempts, method)
+		assert.Equal(t, method, attempts[0].out["method"], method)
+		assert.Equal(t, http.StatusServiceUnavailable, attempts[0].out["status"], method)
+		assert.Equal(t, want.rule, attempts[0].decision.Rule, method)
+		assert.Equal(t, want.ok, last(attempts).err == nil, method)
+		assert.Equal(t, int32(want.attempts), hits.Load(), method)
+	}
+}
+
+// lostReplyIntents loses Reserve's reply on its first call without
+// reserving anything, so the read-back finds nothing and the release
+// releases nothing; later calls work.
+type lostReplyIntents struct {
+	*sendintent.MemoryStore
+	failed atomic.Bool
+}
+
+func (s *lostReplyIntents) Reserve(ctx context.Context, tenant, key string, resendFrom int, token string) (sendintent.Intent, bool, error) {
+	if s.failed.CompareAndSwap(false, true) {
+		return sendintent.Intent{}, false, fmt.Errorf("reserve: %w", dialTimeoutErr)
+	}
+	return s.MemoryStore.Reserve(ctx, tenant, key, resendFrom, token)
+}
+
+var dialTimeoutErr = &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+
+// WS-11: a Reserve whose reply was lost cannot be proven unreserved: the
+// reservation may surface pending later. The worker does not retry it, even
+// though the error itself looks transient, and nothing is sent; the
+// operator's re-run (after checking) sends exactly once.
+func TestWorker_EmailAmbiguousReservation_NeverAutoRetried(t *testing.T) {
+	t.Parallel()
+	email := &scriptedEmail{steps: []emailStep{{}}}
+	intents := &lostReplyIntents{MemoryStore: sendintent.NewMemoryStore()}
+	all, err := connectors.New(connectors.Config{
+		InternalToken: "test-token",
+		SendEmailProviders: map[string]sendemail.ProviderConstructor{
+			"sendgrid": func(context.Context, map[string]any) (sendemail.ProviderClient, error) { return email, nil },
+		},
+		SendIntents: intents,
+	})
+	require.NoError(t, err)
+	conn := all[registry.TypeSendEmail]
+
+	attempts := runTask(tenantCtx(), conn, "", emailInput("messageKey", "invoice-42"), maxAttempts)
+	require.Len(t, attempts, 1, "never retried automatically")
+	d := last(attempts).decision
+	assert.False(t, d.Retry)
+	assert.Equal(t, connectors.ClassUnknown, d.Class)
+	assert.Equal(t, "unknown", d.Rule)
+	assert.Contains(t, d.Reason, "send intent not recorded")
+	assert.Equal(t, "not_delivered", last(attempts).out["deliveryOutcome"])
+	assert.Zero(t, email.deliveredCount())
+
+	rerun := runTask(tenantCtx(), conn, "", emailInput("messageKey", "invoice-42"), maxAttempts)
+	require.Len(t, rerun, 1)
+	require.NoError(t, last(rerun).err)
+	assert.Equal(t, 1, email.deliveredCount())
 }

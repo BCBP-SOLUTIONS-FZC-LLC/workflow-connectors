@@ -1,6 +1,6 @@
 # Wiring workflow-connectors into a connector worker
 
-This guide is for the team that runs the library: `execution_service`'s `cmd/connector-worker` (LLD OQ-14 and OQ-17). It lists everything the worker must provide, in the order to do it. The library reads no configuration, opens no connection and runs no background work of its own: every item below is the worker's job.
+This guide is for the team that runs the library. `execution_service`'s `cmd/connector-worker` follows it (LLD OQ-14 and OQ-17, closed). It lists everything the worker must provide, in the order to do it. The library reads no configuration, opens no connection and runs no background work of its own: every item below is the worker's job.
 
 `workflow-definition-service` needs only `pkg/registry` (README, *Definition Service — compile side*); nothing in this guide applies to it.
 
@@ -29,7 +29,7 @@ go mod tidy
 ```
 
 - **Go 1.26.9 or newer.** This module's `go` directive is `1.26.9` (standard-library security fixes), so the worker's `go.mod` must say at least that.
-- **platform-pgcommon v2 (v2.0.1 or newer).** The document registry and send-intent stores take a `*pgcommon.Pool` from v2. `execution_service` is on v1 today: move it first. v2.0.1 is the minimum: the stores rely on its transaction timeouts.
+- **platform-pgcommon v2 (v2.0.1 or newer).** The document registry and send-intent stores take a `*pgcommon.Pool` from v2. `execution_service` is on v2.0.1. v2.0.1 is the minimum: the stores rely on its transaction timeouts.
 - **Import path `…/workflow-connectors/v2/pkg/…`.** v1.0.0 import paths have no `/v2` and do not compile against v2.
 - **Private modules in CI and Docker builds.** Both modules are private: the worker's image build needs a token for `github.com/BCBP-SOLUTIONS-FZC-LLC` (for example a `GO_PRIVATE_TOKEN` build secret, as the IAM services use).
 
@@ -51,8 +51,8 @@ go mod tidy
 |---|---|
 | Persistence | `appendonly yes`, `appendfsync always` (or `everysec`: each write still waits for its `WAITAOF` confirmation, at up to about a second's latency), `maxmemory-policy noeviction`. `valkeystore.CheckDurability` refuses anything else at startup (on every master and, on a cluster, every replica). |
 | Worker user | Exactly the runbook's ACL line — the integration suite runs every operation as a user created from it: |
-| | `ACL SETUSER docref-worker on ><password> resetkeys ~docref:* resetchannels -@all +eval +evalsha +exists +hmget +hset +time +pexpireat +hgetall +hget +del +waitaof +config\|get +ping` |
-| | On Valkey Cluster also add `+cluster\|slots +command` (derived from go-redis; not covered by the test). |
+| | `ACL SETUSER docref-worker on ><password> resetkeys ~docref:* resetchannels -@all +eval +evalsha +exists +hmget +hset +time +pexpireat +hgetall +hget +del +waitaof +asking +config\|get +ping` |
+| | `+asking` is needed on a cluster as soon as a slot migrates (a user without it fails every operation on that slot with `ASKING: NOPERM`, class unknown). On Valkey Cluster also add `+cluster\|slots +command`, on every node (`TestCluster_DocumentedACL_Suffices` runs every operation, including a slot migration, as such a user). |
 | Client read timeout | Keep it above `valkeystore.Options.WaitAOFTimeout` (default 2 s; go-redis read timeout default 3 s). The store clamps `WaitAOFTimeout` 250 ms below the read timeout. |
 | Sizing | A ref is a few hundred bytes; document size does not matter. 1,000,000 refs a day ≈ 500 MB. With `noeviction`, a full Valkey refuses new refs (transient `docref.ErrUnavailable`) instead of dropping live ones. |
 
@@ -75,11 +75,15 @@ Details: [`docs/runbooks/document-refs.md`](../runbooks/document-refs.md).
 | `s3.<region>.amazonaws.com`, `<account>.blob.core.windows.net`, `storage.googleapis.com`, `www.googleapis.com` + `oauth2.googleapis.com` | `storage` providers |
 | Internal services named in the alias registry | `rest-call` (and `sql-query` once wired) |
 
-Provider clients never follow redirects and speak HTTP/1.1 only, so a proxy must not require HTTP/2.
+Provider clients — the S3, Azure and GCS clients and the Gmail / Graph OAuth token requests included — never follow redirects and speak HTTP/1.1 only, so a proxy must not require HTTP/2. They honour `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` like Go's default transport.
+
+Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient` nil (or a client whose `Transport` is nil) the internal transport has `Proxy` unset, so `x-internal-token` and `x-departments` cannot reach an egress proxy named by `HTTP_PROXY` / `HTTPS_PROXY`. A worker that passes its own `*http.Transport` keeps that transport's `Proxy` setting and must not point it at a proxy outside the platform.
 
 ## 3. Configuration
 
-The library reads no environment variables. The worker reads these and passes the results in.
+The library reads no environment variables (one SDK it builds does: see `STORAGE_EMULATOR_HOST` below). The worker reads these and passes the results in.
+
+**Never set `STORAGE_EMULATOR_HOST` in the worker's environment.** The library does not read it, but the GCS SDK it builds for `gcp-gcs` does: with it set, tenant GCS traffic would go, unauthenticated, to that host. Check the worker's image, Helm values and any sidecar injection. Since v2.1.0, `gcp-gcs` refuses to build a client while it is set (an upstream error naming the variable), so a misconfigured worker fails its GCS calls instead of leaking them.
 
 | Variable | Read by | Value |
 |---|---|---|
@@ -91,7 +95,7 @@ The library reads no environment variables. The worker reads these and passes th
 | Valkey address, user, password, TLS | The worker's go-redis client | The ACL user above |
 | Document bucket name and region | The worker's `*s3.Client` | The platform bucket |
 | Internal service token | `connectors.Config.InternalToken` | Required; `connectors.New` fails without it. Sent as `x-internal-token` on every `rest-call`. |
-| Alias registry | `connectors.Config.Aliases` | `aliasconfig.Load(path)` (validated on load), or built in code and checked with `Validate()` |
+| Alias registry | `connectors.Config.Aliases` | `aliasconfig.Load(path)` (strict YAML: an unknown or misspelt key, or a second document with content, is an error — empty documents such as `---` or `--- ~` are ignored; validated on load), or built in code. `connectors.New` runs `Validate()` on it either way and fails on an invalid alias (for example a `baseURL` with a query or fragment, or a `pathTemplate` with a `#` — write `%23` —, a raw space or other character invalid in a URL outside a `{placeholder}`, an unterminated `{`, a bad `%` escape, or a `;` or unparsable query). |
 
 **Tenant credentials are not configuration.** Fields the registry marks `secret_ref` (`registry.Field.IsSecretRef()`) are resolved per task from OpenBao for the job's own tenant (§5).
 
@@ -103,7 +107,7 @@ Do this once per process, and **exit on any error**: each check guards against s
 
 1. **Pool.** `pgcommon.ConfigFromEnv()` (log its warnings), then `pgcommon.NewPool`.
 2. **Migrations.** `documentsql.ApplySchema(ctx, runner)` and `intentsql.ApplySchema(ctx, runner)` with `runner := &migrate.Runner{DSN: pgcommon.MigrationDSNFromEnv()}`. Safe to run from every replica at once: they serialise on the advisory lock and apply each version once. Run them in the worker's migration step or at startup, before step 5.
-3. **Durability checks.** `valkeystore.CheckDurability(ctx, valkey)` and `s3content.New(s3Client, bucket).Check(ctx, "docrefs/")`. `valkeystore.ErrConfigUnavailable` means a managed Valkey blocks `CONFIG` but the `WAITAOF` probe passed: verify the settings in the provider console, then decide whether to start.
+3. **Durability checks.** `valkeystore.CheckDurability(ctx, valkey)` and `s3content.New(s3Client, bucket).Check(ctx, "docrefs/")`. Classify the `CheckDurability` error in this order: first `errors.As(err, &derr)` with `var derr *valkeystore.DurabilityError` — some node is not a durable store (or its `WAITAOF` probe failed): refuse to start, whatever else the error contains; then `errors.Is(err, valkeystore.ErrConfigUnavailable)` — returned only when *every* failure is a managed Valkey refusing `CONFIG GET` itself (`NOPERM`, or `ERR unknown command` / `unknown subcommand`) after its `WAITAOF` probe passed: verify the settings in the provider console, then decide whether to start; anything else (a node unreachable, the slot map not loadable, `WRONGPASS` — a master or replica without the worker's ACL user —, `LOADING`, `BUSY`, maxclients) is a startup failure. Also call `valkeystore.Options.Validate()` on the options you pass to `valkeystore.New`: a store built from invalid options refuses every `Put` with `valkeystore.ErrInvalidOptions`.
 4. **Document refs.** `docref.NewService(valkeystore.New(valkey, valkeystore.Options{}), content, docref.WithKeyPrefix("docrefs/"))`.
    - `Options.WaitReplicas`: 0 (default) confirms each write in the primary's AOF only; a ref can be lost if the primary fails over. Set it to the number of replicas per primary (at most) to survive a failover, at the cost of writes failing while too few replicas are up.
 5. **Connectors.** `connectors.New(connectors.Config{…})` with **every** provider the registry advertises:
@@ -119,8 +123,8 @@ Do this once per process, and **exit on any error**: each check guards against s
 
    - `DocRefs`: the service from step 4. nil disables document refs (`createDocument`, ref content and email attachments become validation errors).
    - `SendIntents`: `intentsql.New(pool)`. nil makes any `messageKey` a validation error. Wire it: it is what stops a redelivered job from sending an email twice.
-   - `HTTPClient`: leave nil unless you need a custom transport. nil gives each internal call its alias timeout (else 30 s), no redirects and HTTP/1.1 only. A caller's `*http.Transport` is cloned with HTTP/2 off; any other `RoundTripper` is used as-is and must not enable HTTP/2.
-   - `ChatNotifyClient`: nil until a real provider ships (LLD OQ-8); the connector then fails every call with a validation error.
+   - `HTTPClient`: leave nil unless you need a custom transport. nil gives each internal call its alias timeout (else 30 s), no redirects, HTTP/1.1 only and no proxy. A caller's `*http.Transport` is cloned with HTTP/2 off (its `Proxy` kept); any other `RoundTripper` is used as-is and must not enable HTTP/2. Wrapping `http.DefaultTransport` process-wide (otelhttp, httpmock) is safe: the library then builds its transports with Go's default settings (`shared.BaseTransport`).
+   - `ChatNotifyClient`: nil until a real provider ships (LLD OQ-8); the connector then fails every call with a validation error. `chat-notify` is not in `registry.All()`, so no workflow can be authored with it; `DecideRetry` still knows its `unsafe` policy (`registry.Lookup`).
    - Never register `MockStorageClient` or `MockSendEmailClient` in production.
 6. **Keep the returned map** for the life of the process. Each `connectors.New` call builds new client caches.
 
@@ -138,7 +142,7 @@ out, err := byType[task.Type].Execute(ctx, task.Input)
 - **Departments.** `rest-call` sends them as `x-departments`. A missing, empty or malformed list (an entry that is empty or contains `,`, CR or LF) fails the call with `ErrMissingInternalAuth` before anything is sent.
 - **Secrets.** Resolve every `secret_ref` field for the job's own tenant immediately before `Execute` and put the values in `Input`. Keep them in memory only; never write them to `context_json`, history or logs. The library never sees an OpenBao path.
 - **Timeout.** Keep the per-call timeout below `documents.DefaultLease` (15 minutes), so a live Drive upload never loses its lease (LLD DOC-6, OQ-13).
-- **Outputs.** Forward the output map unchanged. It is returned with failures too: `send-email` always carries `deliveryOutcome`, and a `rest-call` status `>= 300` carries `status`, `headers` and `body`.
+- **Outputs.** Forward the output map unchanged. It is returned with failures too: `send-email` always carries `deliveryOutcome`; a `rest-call` carries `method` (the HTTP method sent) on every result once the request was sent, and a status `>= 300` also `status`, `headers` and `body`. A `2xx` whose body exceeds 10 MiB fails permanently with reason `response too large` (not `ErrValidation`: the service processed the call), with `status`, `headers` and `bodyTruncated: true`.
 - **Concurrency.** `Execute` is safe for concurrent use. Bound concurrency per connector type with the worker's own pools (LLD §S6.5); the library has no rate limiter.
 
 ## 6. Failures and retries
@@ -146,14 +150,15 @@ out, err := byType[task.Type].Execute(ctx, task.Input)
 The library never retries. **Every** automatic retry — the worker's loop, a workflow activity retry policy, queue redelivery — must ask `connectors.DecideRetry` first:
 
 ```go
-d := connectors.DecideRetry(task.Type, err, aliasMethod) // aliasMethod: rest-call only
+method, _ := out["method"].(string) // rest-call only; "" for other types
+d := connectors.DecideRetry(task.Type, err, method)
 ```
 
-- `aliasMethod` is the `rest-call` alias's HTTP method: `aliasconfig.ResolveEndpoint(aliases, input["endpointAlias"]).Method`. Pass `""` for other types.
+- `method` is the HTTP method the `rest-call` sent, from Execute's output `method`: it is set on every result once the request was sent, failures included, so there is no need to resolve the alias again. Without it (nothing was sent) the error is permanent and `""` is safe. Other types ignore it.
 - Only a **transient** error may be retried, and only when the type's policy allows it: `storage` always; `rest-call` only for an idempotent method; `send-email` only when the provider provably never accepted the message; `chat-notify` never.
 - A **permanent** or **unknown** error is never retried automatically. Unknown includes an email whose delivery is uncertain.
 - Bound transient retries: exponential backoff with jitter and an attempt limit. A transient failure can persist.
-- Queue redelivery counts as a retry. If the worker re-runs a job after a crash, `send-email` with a `messageKey` is safe: a duplicate of an accepted email succeeds with `duplicate: true` and sends nothing.
+- Queue redelivery counts as a retry. If the worker re-runs a job after a crash, `send-email` with a `messageKey` is safe: a duplicate of an accepted email succeeds with `duplicate: true` and sends nothing; its output carries the original `messageId` and `sentAt` (with `sent: false`), even if its attachment refs have expired since.
 
 **Log and count every decision:**
 
@@ -168,7 +173,7 @@ d := connectors.DecideRetry(task.Type, err, aliasMethod) // aliasMethod: rest-ca
 | `connectors.ErrValidation` | Bad input or configuration; permanent. |
 | `connectors.ErrMissingInternalAuth`, `connectors.ErrMissingTenant` | The worker did not set departments or the tenant; a worker bug. |
 | `connectors.ErrUpstream` | A provider or internal service failed; read the class with `connectors.ClassOf`. |
-| `connectors.ErrNotDelivered`, `connectors.ErrDeliveryUnknown`; `*sendemail.SendError` | `send-email` outcome; the error carries provider, HTTP status and outcome. |
+| `connectors.ErrNotDelivered`, `connectors.ErrDeliveryUnknown`; `*sendemail.SendError` | `send-email` outcome; the error carries provider, HTTP status and outcome. `IntentUnrecorded` set: a failure after the reservation whose outcome could not be stored on the intent (invalid input found at that point included) — class unknown, the intent stays `pending` until an operator resolves it. A send that would start more than 11 min 50 s after its reservation is refused (`not_delivered`, transient), so a pending intent never turns stale while its send can be in flight. |
 | `*sendintent.DuplicateRequestError` | A duplicate of a pending or unknown email; permanent. Its `Attempts` is what an explicit resend must name. |
 | `documents.ErrUploadInProgress` (`*documents.InProgressError`) | Another call holds the Drive document; transient. |
 
@@ -182,10 +187,10 @@ Classify only with `connectors.ClassOf`, `IsTransient`, `IsPermanent` or `Decide
 |---|---|---|
 | Credential rotation | Call `ResetClients()` on the `storage` and `send-email` connectors (type-assert `interface{ ResetClients() }` on the map's values). Calls in flight keep their client until they finish. | After a tenant's provider credentials change |
 | Drive audit pruning | `documentsql.Store.PruneAttempts(ctx, cutoff, batch)`, repeated while it returns `batch` | Daily, with the retention your audit policy requires |
-| Send intents | Rows are kept for duplicate protection; there is no pruning API. Archive or delete by `created_at` only beyond the longest window in which a job can be redelivered or resent. | Per data-retention policy |
+| Send-intent pruning | `intentsql.Store.PruneIntents(ctx, olderThan, batch)`, repeated while it returns `batch`; deletes finished (non-`pending`) intents only | Daily, with `olderThan` longer than any redelivery or replay of a send-email step can arrive (days): a pruned `messageKey` is a new message and is sent again |
 | Document refs | Nothing to run: refs expire in Valkey after 24 h and objects by the bucket lifecycle rule | — |
 | Shutdown | Stop taking tasks, wait for running calls, then `pool.DrainAndClose(ctx)` and close the Valkey client | On SIGTERM |
-| Valkey failover | With `WaitReplicas` 0, a ref acknowledged just before a primary failover can be lost; the consuming step then fails permanently with DocumentReferenceNotFound. Re-run the affected workflows from the producing step. | Incident |
+| Valkey failover | On a cluster, the first call that hits the dead master fails (transient) and schedules a slot-map reload, so later calls reach the promoted replica at once. With `WaitReplicas` 0, a ref acknowledged just before a primary failover can be lost; the consuming step then fails permanently with DocumentReferenceNotFound. Re-run the affected workflows from the producing step. | Incident |
 
 ## 8. Verification checklist
 
@@ -195,14 +200,18 @@ Before go-live, and after every library upgrade (read the `CHANGELOG.md` section
 - [ ] Migrations ran over a direct connection; the three tables and both `*_migrations` tables exist.
 - [ ] Runtime pool goes through PgBouncer with `PG_BOUNCER_MODE=true`, `PG_STATEMENT_TIMEOUT` and `PG_LOCK_TIMEOUT` set.
 - [ ] Startup fails when Valkey has `appendonly no`, and when the S3 role lacks `s3:ListBucket` (try both in staging).
-- [ ] The worker's Valkey user is the runbook ACL line, not `default`.
+- [ ] The worker's Valkey user is the runbook ACL line, not `default`, on every master and replica (`CheckDurability` fails with `WRONGPASS` otherwise).
 - [ ] Every registry provider is registered; no mock clients.
+- [ ] `STORAGE_EMULATOR_HOST` is not set in the worker's environment.
+- [ ] Drive folders are configured by ID (an alias such as `root` works but costs an extra list call per recorded-file call).
 - [ ] `SendIntents` and `DocRefs` are set.
 - [ ] Every task sets `WithTenant`; `rest-call` tasks set `WithDepartments`.
 - [ ] Per-call timeout below 15 minutes.
 - [ ] Every retry path (loop, activity retry policy, redelivery) calls `DecideRetry`; retries are bounded with backoff.
 - [ ] Failures are logged with `d.LogAttrs()` and counted by class; `deliveryOutcome` is logged for `send-email`.
 - [ ] `PruneAttempts` is scheduled.
+- [ ] `PruneIntents` is scheduled, with a retention longer than any redelivery window.
+- [ ] Tenants' Microsoft 365 / Google Workspace credentials are restricted to their sending mailboxes (Application Access Policy, narrow delegation): the library does not bind `senderEmail` to the credential.
 - [ ] Staging smoke test: a workflow that stores a document (`createDocument`), emails it as an attachment with a `messageKey`, and is then redelivered — exactly one email arrives and the second run reports `duplicate: true`.
 
 ---
@@ -243,7 +252,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/storage"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/storage/gocloud"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/storage/googledrive"
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/registry"
 )
 
 // Deps are built by the worker from its own configuration.
@@ -257,11 +265,10 @@ type Deps struct {
 }
 
 type Worker struct {
-	byType  map[string]connectors.Connector
-	pool    *pgcommon.Pool
-	docs    *documentsql.Store
-	aliases aliasconfig.Config
-	log     *slog.Logger
+	byType map[string]connectors.Connector
+	pool   *pgcommon.Pool
+	docs   *documentsql.Store
+	log    *slog.Logger
 }
 
 // docrefPrefix is the S3 key prefix of document refs; the bucket's
@@ -328,12 +335,12 @@ func Start(ctx context.Context, d Deps) (*Worker, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Worker{byType: byType, pool: pool, docs: docs, aliases: d.Aliases, log: d.Log}, nil
+	return &Worker{byType: byType, pool: pool, docs: docs, log: d.Log}, nil
 }
 
 // Task is one connector step of a workflow instance.
 type Task struct {
-	Type        string         // registry.TypeStorage, TypeSendEmail, …
+	Type        string         // registry.TypeStorage, TypeSendEmail, TypeRestCall
 	TenantID    string         // the job's own tenant
 	Departments []string       // dept_uuid:role pairs (rest-call)
 	Input       map[string]any // secret_ref fields already resolved for TenantID
@@ -354,7 +361,6 @@ func (w *Worker) Run(ctx context.Context, t Task) (map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown connector type %q", t.Type)
 	}
-	method := w.httpMethod(t)
 
 	for attempt := 1; ; attempt++ {
 		callCtx, cancel := context.WithTimeout(ctx, taskTimeout)
@@ -364,7 +370,7 @@ func (w *Worker) Run(ctx context.Context, t Task) (map[string]any, error) {
 			return out, nil
 		}
 
-		d := connectors.DecideRetry(t.Type, err, method)
+		d := connectors.DecideRetry(t.Type, err, sentMethod(out))
 		attrs := append(d.LogAttrs(), slog.String("type", t.Type), slog.Int("attempt", attempt))
 		if outcome, ok := out["deliveryOutcome"]; ok {
 			attrs = append(attrs, slog.Any("delivery_outcome", outcome))
@@ -384,17 +390,13 @@ func (w *Worker) Run(ctx context.Context, t Task) (map[string]any, error) {
 	}
 }
 
-// httpMethod is what DecideRetry needs for rest-call: the alias's method.
-func (w *Worker) httpMethod(t Task) string {
-	if t.Type != registry.TypeRestCall {
-		return ""
-	}
-	alias, _ := t.Input["endpointAlias"].(string)
-	ep, err := aliasconfig.ResolveEndpoint(w.aliases, alias)
-	if err != nil {
-		return "" // the call itself fails with ErrValidation
-	}
-	return ep.Method
+// sentMethod is what DecideRetry needs for rest-call: the HTTP method the
+// call sent, returned as "method" with every result once the request was
+// sent. Nothing sent means a permanent error, so "" is safe; other types
+// ignore the method.
+func sentMethod(out map[string]any) string {
+	m, _ := out["method"].(string)
+	return m
 }
 
 // RotateCredentials drops cached provider clients after tenant credentials

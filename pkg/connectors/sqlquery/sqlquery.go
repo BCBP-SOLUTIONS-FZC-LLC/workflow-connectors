@@ -1,3 +1,11 @@
+// Package sqlquery is the sql-query connector core: it runs a named query
+// (an alias's queryId) on an internal platform service.
+//
+// EXPERIMENTAL — not for production. It is not built by connectors.New nor
+// listed in registry.All(), and its API may change in any release. Known
+// gaps: the request carries no tenant scope (no connectors.WithTenant check
+// and no tenant sent to the service), so tenant isolation rests entirely on
+// the service and the x-departments header.
 package sqlquery
 
 import (
@@ -5,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/aliasconfig"
@@ -46,8 +55,17 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, fmt.Errorf("%w: %w", shared.ErrValidation, err)
 	}
 
-	params, _ := input["params"].([]any)
-	if q.ParamCount > 0 && len(params) != q.ParamCount {
+	// paramCount is exact: 0 means the query takes no params, so a stray
+	// params list is rejected rather than silently sent or dropped.
+	var params []any
+	if raw, present := input["params"]; present && raw != nil {
+		list, ok := raw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("%w: params must be a list, got %T", shared.ErrValidation, raw)
+		}
+		params = list
+	}
+	if len(params) != q.ParamCount {
 		return nil, fmt.Errorf("%w: queryAlias %q expects %d params, got %d", shared.ErrValidation, alias, q.ParamCount, len(params))
 	}
 
@@ -84,9 +102,15 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.HTTPStatusError(resp.StatusCode, fmt.Errorf("sql-query %q: status %d", alias, resp.StatusCode)))
 	}
-	raw, err := shared.ReadAllLimited(resp.Body, shared.MaxResponseBytes, "response body")
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, shared.MaxResponseBytes+1))
 	if err != nil {
 		return nil, shared.Classify(fmt.Sprintf("sql-query %q: reading response", alias), err)
+	}
+	if int64(len(raw)) > shared.MaxResponseBytes {
+		// As in rest-call: the service processed the query, so this is not
+		// invalid input, and a retry would get the same oversized result.
+		return nil, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.Permanent(shared.ReasonResponseTooLarge,
+			fmt.Errorf("%w: sql-query %q: status %d response body exceeds the %d-byte limit", shared.ErrTooLarge, alias, resp.StatusCode, shared.MaxResponseBytes)))
 	}
 	var parsed sqlQueryResponse
 	if err := shared.DecodeJSON(raw, &parsed); err != nil {

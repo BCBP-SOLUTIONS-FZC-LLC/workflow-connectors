@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"regexp"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -35,9 +36,18 @@ func NewProvider(_ context.Context, params map[string]any) (sendemail.ProviderCl
 	if accessKey == "" || secretKey == "" || region == "" {
 		return nil, fmt.Errorf("%w: accessKey, secretKey, and region are required for aws-ses", shared.ErrValidation)
 	}
+	// The region becomes part of the endpoint's host name.
+	if !regionPattern.MatchString(region) {
+		return nil, fmt.Errorf("%w: region must be an AWS region name such as eu-west-1", shared.ErrValidation)
+	}
 
 	return newSESClient(accessKey, secretKey, region), nil
 }
+
+// regionPattern is one lower-case DNS label: the region is placed in the
+// endpoint host (email.<region>.amazonaws.com), so a value with dots, a
+// slash or an at sign could point the signed request at another host.
+var regionPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // newSESClient builds the client; optFns let tests point it at a test server.
 func newSESClient(accessKey, secretKey, region string, optFns ...func(*sesv2.Options)) *sesClient {

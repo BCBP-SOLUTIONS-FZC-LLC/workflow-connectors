@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,4 +88,40 @@ func TestSQLQuery_MissingDepartments_FailsClosed(t *testing.T) {
 	_, err := conn.Execute(context.Background(), map[string]any{"queryAlias": "get-tenants"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrMissingInternalAuth))
+}
+
+// paramCount 0 means exactly zero params; params that are not a list are
+// invalid input, never silently dropped.
+func TestSQLQuery_ParamsMustMatchExactly(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resultSet":[]}`))
+	}))
+	defer srv.Close()
+	ctx := shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+
+	none := sqlQueryConnector(srv, aliasconfig.Query{Alias: "q", Path: "/q", QueryID: "q", ParamCount: 0})
+	_, err := none.Execute(ctx, map[string]any{"queryAlias": "q", "params": []any{"x"}})
+	require.ErrorIs(t, err, shared.ErrValidation, "paramCount 0 takes no params")
+
+	for _, ok := range []map[string]any{
+		{"queryAlias": "q"},
+		{"queryAlias": "q", "params": nil},
+		{"queryAlias": "q", "params": []any{}},
+	} {
+		_, err = none.Execute(ctx, ok)
+		require.NoError(t, err, "%v", ok)
+	}
+
+	one := sqlQueryConnector(srv, aliasconfig.Query{Alias: "q", Path: "/q", QueryID: "q", ParamCount: 1})
+	for _, bad := range []any{"active", map[string]any{"a": 1}, []string{"active"}, json.Number("1")} {
+		_, err = one.Execute(ctx, map[string]any{"queryAlias": "q", "params": bad})
+		require.ErrorIs(t, err, shared.ErrValidation, "%T", bad)
+		assert.Contains(t, err.Error(), "params must be a list")
+	}
+	assert.Equal(t, int32(3), calls.Load(), "no rejected call reached the service")
 }

@@ -50,17 +50,25 @@ jobs:
   test:
     name: test
     if: ${{ !inputs.skip }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Integration infrastructure comes from docker-compose.yml — the same
     # stack `make docker-up` starts locally: PostgreSQL (direct and through
     # PgBouncer in transaction mode), Valkey with the production persistence
-    # settings, and floci S3. The TEST_* values match the compose host ports.
+    # settings, floci S3, and (profile valkey-cluster) a Valkey Cluster of
+    # three masters with one replica each. The TEST_* values match the
+    # compose host ports.
     env:
       TEST_POSTGRES_DSN: postgres://postgres:test@localhost:55432/connectors?sslmode=disable
       TEST_PGBOUNCER_DSN: postgres://postgres:test@localhost:55433/connectors?sslmode=disable
       TEST_VALKEY_ADDR: localhost:56379
       TEST_S3_ENDPOINT: http://localhost:4580
+      # The Valkey Cluster tests' seed nodes (compose's default
+      # WC_VALKEY_CLUSTER_PORTS, 57001-57006; the nodes announce them).
+      TEST_VALKEY_CLUSTER_ADDRS: 127.0.0.1:57001,127.0.0.1:57002,127.0.0.1:57003
+      # Compose profiles every `docker compose` call below enables (pull, up,
+      # logs), matching the Makefile's docker-up.
+      COMPOSE_PROFILES: valkey-cluster
       # The Valkey restart tests run their own containers.
       TEST_VALKEY_DOCKER: "1"
       # Every image (compose and the Valkey restart tests) comes from Google's

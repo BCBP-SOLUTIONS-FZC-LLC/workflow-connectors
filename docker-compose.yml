@@ -17,7 +17,14 @@
 #             AWS emulator (iam-user-profile and iam-org-membership use the
 #             same image); init-floci.sh creates the dev document bucket.
 #
-#   make docker-up           start and wait for every healthcheck
+#   valkey-cluster (profile valkey-cluster) a Valkey Cluster of three
+#             masters with one replica each, for the cluster tests in
+#             test/integration/valkeystore (slot migration, failover,
+#             durability on every node). `make docker-up` and CI enable the
+#             profile; a plain `docker compose up` leaves it out.
+#
+#   make docker-up           start (with the valkey-cluster profile) and wait
+#                            for every healthcheck
 #   make test / make test-ci all three suites (unit, postgres, integration);
 #                            test-postgres and test-integration run one each
 #   make docker-down         stop and delete the volumes
@@ -121,6 +128,44 @@ services:
       timeout: 5s
       retries: 30
       start_period: 2s
+
+  # Profile valkey-cluster (enabled by `make docker-up`, `make docker-down`
+  # and CI's validate-test.yml; a plain `docker compose up` leaves it out): a
+  # Valkey Cluster of three masters with one replica each, for the cluster
+  # tests in test/integration/valkeystore (cluster_test.go,
+  # TEST_VALKEY_CLUSTER_ADDRS): slot migration (ASK / MOVED), a manual
+  # failover, CheckDurability on every master and replica, the runbook's ACL.
+  # The six nodes run in one container (scripts/valkey-cluster.sh, the
+  # container's PID 1: it handles SIGTERM by shutting the nodes down) and
+  # announce 127.0.0.1, so the host reaches each one at the address the
+  # cluster gives in its slot map and redirects; host and container ports are
+  # therefore identical: WC_VALKEY_CLUSTER_PORTS, a range of six (default
+  # 57001-57006; the first three start as masters). The cluster bus,
+  # 27001-27006, stays inside the container. Every container start wipes the
+  # node directories and creates a fresh cluster, so a restarted container
+  # (or one a test left mid-migration) comes back clean. Healthy means every
+  # node reports cluster_state:ok and knows all six nodes, none is flagged
+  # failing, and three replicas have their replication link up.
+  #
+  #   make docker-up        (or: docker compose --profile valkey-cluster up -d --wait)
+  #   TEST_VALKEY_CLUSTER_ADDRS=127.0.0.1:57001,127.0.0.1:57002,127.0.0.1:57003 \
+  #     go test -tags=integration ./test/integration/valkeystore/ -run TestCluster
+  valkey-cluster:
+    profiles: ["valkey-cluster"]
+    image: ${WC_REGISTRY:-docker.io}/valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
+    environment:
+      VALKEY_CLUSTER_PORTS: ${WC_VALKEY_CLUSTER_PORTS:-57001-57006}
+    entrypoint: ["/bin/sh", "/usr/local/bin/valkey-cluster.sh"]
+    command: ["run"]
+    volumes:
+      - ./scripts/valkey-cluster.sh:/usr/local/bin/valkey-cluster.sh:ro
+    ports:
+      - "${WC_VALKEY_CLUSTER_PORTS:-57001-57006}:${WC_VALKEY_CLUSTER_PORTS:-57001-57006}"
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/usr/local/bin/valkey-cluster.sh", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
 
 volumes:
   postgres_data:

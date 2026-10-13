@@ -331,3 +331,37 @@ func TestClientCache_ConcurrentAcquireReleaseReset(t *testing.T) {
 		assert.Equalf(t, int32(1), c.closes.Load(), "client %d must be closed exactly once", c.id)
 	}
 }
+
+// A caller that loses the build race still uses the stored client, so it
+// counts as a use for least-recently-used eviction.
+func TestClientCache_LostRaceCountsAsRecentUse(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFactory{}
+	cache := NewClientCache[*fakeClient](2)
+	var aClient *fakeClient
+	h, err := cache.Acquire("a", func() (*fakeClient, error) {
+		// While this build runs unlocked, another caller stores "a", then "b".
+		inner, err := cache.Acquire("a", f.build)
+		require.NoError(t, err)
+		aClient = inner.Client()
+		inner.Release()
+		hb, err := cache.Acquire("b", f.build)
+		require.NoError(t, err)
+		hb.Release()
+		return f.build()
+	})
+	require.NoError(t, err)
+	assert.Same(t, aClient, h.Client(), "the first stored client wins")
+	h.Release()
+
+	hc, err := cache.Acquire("c", f.build) // full: evicts b, now the least recent
+	require.NoError(t, err)
+	hc.Release()
+
+	assert.False(t, aClient.closed(), "a was used last by the race loser and stays cached")
+	again, err := cache.Acquire("a", f.build)
+	require.NoError(t, err)
+	assert.Same(t, aClient, again.Client())
+	again.Release()
+}

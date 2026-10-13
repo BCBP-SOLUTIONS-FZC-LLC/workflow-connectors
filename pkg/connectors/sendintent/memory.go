@@ -81,6 +81,48 @@ func (m *MemoryStore) Record(_ context.Context, intentID string, attempt int, st
 	return nil
 }
 
+// Release marks the intent not_delivered when it is still pending under
+// token (see Releaser).
+func (m *MemoryStore) Release(_ context.Context, tenantID, messageKey, token string) (bool, error) {
+	if token == "" {
+		return false, ErrNoToken
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	in, ok := m.byKey[[2]string{tenantID, messageKey}]
+	if !ok || in.ReservationToken != token || in.Status != StatusPending {
+		return false, nil
+	}
+	in.Status = StatusNotDelivered
+	in.Detail = ReleasedDetail
+	in.UpdatedAt = m.now()
+	return true, nil
+}
+
+// PruneIntents deletes finished (not pending) intents last updated more than
+// olderThan ago, at most batch, and returns how many it deleted. See sqlstore.PruneIntents:
+// a pruned messageKey is accepted again as a new message.
+func (m *MemoryStore) PruneIntents(_ context.Context, olderThan time.Duration, batch int) (int64, error) {
+	if olderThan <= 0 || batch <= 0 {
+		return 0, ErrPruneArgs
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := m.now().Add(-olderThan)
+	var deleted int64
+	for key, in := range m.byKey {
+		if deleted == int64(batch) {
+			break
+		}
+		if in.Status != StatusPending && in.UpdatedAt.Before(cutoff) {
+			delete(m.byKey, key)
+			delete(m.byID, in.ID)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 // Get returns the intent for tenant + messageKey.
 func (m *MemoryStore) Get(_ context.Context, tenantID, messageKey string) (Intent, bool, error) {
 	m.mu.Lock()
@@ -92,4 +134,7 @@ func (m *MemoryStore) Get(_ context.Context, tenantID, messageKey string) (Inten
 	return *in, true, nil
 }
 
-var _ Store = (*MemoryStore)(nil)
+var (
+	_ Store    = (*MemoryStore)(nil)
+	_ Releaser = (*MemoryStore)(nil)
+)

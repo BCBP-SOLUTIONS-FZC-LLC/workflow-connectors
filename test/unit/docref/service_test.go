@@ -167,6 +167,45 @@ func TestService_FailedMetadataWrite_RemovesTheObject(t *testing.T) {
 	assert.Zero(t, content.Len(), "no orphaned object is left behind")
 }
 
+// lostReplyStore stores the ref but reports failure, as a Put whose reply was
+// lost or whose write was not confirmed durable does.
+type lostReplyStore struct{ *docref.MemoryStore }
+
+func (l lostReplyStore) Put(ctx context.Context, ref docref.Ref) (docref.Ref, error) {
+	if _, err := l.MemoryStore.Put(ctx, ref); err != nil {
+		return docref.Ref{}, err
+	}
+	return docref.Ref{}, docref.ErrUnavailable
+}
+
+// An ambiguous metadata write may have landed: Create removes the reference
+// as well as the object, so no ref outlives a reported failure pointing at a
+// deleted object.
+func TestService_AmbiguousMetadataWrite_RemovesReferenceAndObject(t *testing.T) {
+	t.Parallel()
+	refs, content := docref.NewMemoryStore(), docref.NewMemoryContent("docs")
+	var stored []string
+	svc := docref.NewService(recordingStore{lostReplyStore{refs}, &stored}, content)
+	_, err := svc.Create(context.Background(), "tenant-1", "text/plain", []byte("x"))
+	require.ErrorIs(t, err, docref.ErrUnavailable)
+	require.Len(t, stored, 1)
+	_, found, err := refs.Get(context.Background(), "tenant-1", stored[0])
+	require.NoError(t, err)
+	assert.False(t, found, "the reference the store kept is removed")
+	assert.Zero(t, content.Len(), "the object is removed")
+}
+
+// recordingStore records the ID of every Put.
+type recordingStore struct {
+	docref.Store
+	ids *[]string
+}
+
+func (r recordingStore) Put(ctx context.Context, ref docref.Ref) (docref.Ref, error) {
+	*r.ids = append(*r.ids, ref.ID)
+	return r.Store.Put(ctx, ref)
+}
+
 func TestService_Delete_RemovesReferenceAndObject(t *testing.T) {
 	t.Parallel()
 	svc, _, content := newService()
@@ -335,8 +374,13 @@ func TestService_ObjectKeyNotDerivedFromID_IsIntegrityViolation(t *testing.T) {
 		assert.ErrorIs(t, err, docref.ErrIntegrityViolation, "open: %s", name)
 		_, _, err = svc.Read(ctx, "tenant-1", ref.ID, 1<<20)
 		assert.ErrorIs(t, err, docref.ErrIntegrityViolation, "read: %s", name)
-		assert.ErrorIs(t, svc.Delete(ctx, "tenant-1", ref.ID), docref.ErrIntegrityViolation, "delete: %s", name)
-		assert.Equal(t, 2, content.Len(), "delete: %s: no object removed", name)
+		// Delete removes the untrusted record and the reference's own
+		// object (derived from the tenant and ID), never the object the
+		// record names: that may be another document.
+		require.NoError(t, svc.Delete(ctx, "tenant-1", ref.ID), "delete: %s", name)
+		_, err = svc.Lookup(ctx, "tenant-1", ref.ID)
+		assert.ErrorIs(t, err, docref.ErrNotFound, "delete: %s: the record is gone", name)
+		assert.Equal(t, 1, content.Len(), "delete: %s: only the reference's own object is removed", name)
 	}
 	_, _, err = svc.Read(ctx, "tenant-1", other.ID, 1<<20)
 	assert.NoError(t, err, "the other document is untouched")

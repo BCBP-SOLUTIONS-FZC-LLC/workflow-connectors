@@ -76,7 +76,7 @@ jobs:
   # ── docs-only detection + the draft / skip-ci gate ───────────────────────
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.detect.outputs.code }}
@@ -142,7 +142,7 @@ jobs:
   # decided at release time, where release.yml runs the same check blocking.
   api-compat:
     name: API compatibility
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.run == 'true'
     timeout-minutes: 10
@@ -179,7 +179,7 @@ jobs:
   # and smoke), so the two pipelines have the same shape.
   build-image-cache:
     name: Build image (cache)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.run == 'true'
     timeout-minutes: 2
@@ -192,7 +192,7 @@ jobs:
   # build; the org ruleset's "Lint Dockerfile" check is kept as its own job.)
   lint-dockerfile:
     name: Lint Dockerfile
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.run == 'true'
     timeout-minutes: 2
@@ -206,7 +206,7 @@ jobs:
   # worker, not a standalone deployable.
   smoke-tests:
     name: Smoke tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changes, validate-test, build-image-cache]
     if: needs.changes.outputs.run == 'true'
     timeout-minutes: 2
@@ -217,7 +217,7 @@ jobs:
   # ── gates on validate-test + build-image, runs in parallel with smoke ────
   trivy:
     name: Trivy CVE scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changes, validate-test, build-image-cache]
     if: needs.changes.outputs.run == 'true'
     timeout-minutes: 15
@@ -232,11 +232,18 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
+      # A cache key is immutable: a fixed key would be saved once and the
+      # vulnerability DB never refreshed in the cache. One key per UTC day
+      # saves the day's DB; restore-keys falls back to the latest earlier one.
+      - name: Trivy DB cache date
+        id: trivy-date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Cache Trivy DB
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/trivy-cache
-          key: trivy-db-${{ runner.os }}
+          key: trivy-db-${{ runner.os }}-${{ steps.trivy-date.outputs.date }}
           restore-keys: |
             trivy-db-${{ runner.os }}-
 
@@ -306,7 +313,7 @@ jobs:
   # ── posts or updates a single comment on every PR push ───────────────────
   pr-summary:
     name: PR summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changes, validate-test, validate-quality, api-compat, trivy, build-image-cache, lint-dockerfile, smoke-tests]
     if: always() && github.event_name == 'pull_request'
     timeout-minutes: 5

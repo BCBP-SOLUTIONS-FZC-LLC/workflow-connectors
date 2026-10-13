@@ -1,0 +1,1 @@
+ALTER TABLE connector_send_intents DROP CONSTRAINT IF EXISTS chk_connector_send_intents_attempts;

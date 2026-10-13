@@ -81,6 +81,8 @@ func TestNewInternalRequest_StaysOnTheAliasHost(t *testing.T) {
 		{"http://svc", "/%zz"},              // unparsable result
 		{"http://[::1", "/x"},               // unparsable base
 		{"http://svc", ""},                  // nothing to append
+		{"http://svc", "/x#?role=user"},     // fragment: the fixed query would vanish
+		{"http://svc", "/x#"},               // empty fragment
 	} {
 		_, err := shared.NewInternalRequest(ctx, http.MethodGet, tc.base, tc.path, nil)
 		require.ErrorIs(t, err, shared.ErrValidation, "%s + %s", tc.base, tc.path)
@@ -100,7 +102,7 @@ func TestApplyQueryParams_CannotOverrideTemplateKey(t *testing.T) {
 	assert.Equal(t, "scope=own", req.URL.RawQuery, "the request is left as the alias built it")
 
 	require.NoError(t, shared.ApplyQueryParams(req, map[string]any{"page": json.Number("2")}))
-	assert.Equal(t, "page=2&scope=own", req.URL.RawQuery)
+	assert.Equal(t, "scope=own&page=2", req.URL.RawQuery, "appended after the alias's fixed query")
 	require.NoError(t, shared.ApplyQueryParams(req, nil))
 }
 
@@ -112,7 +114,7 @@ func TestDecodeBody_KeepsLargeIntegersExact(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, json.Number("12345678901234567890"), m["id"])
 	assert.Equal(t, json.Number("9007199254740993"), m["amount"])
-	assert.Equal(t, "9007199254740993", shared.FormatParam(m["amount"]))
+	assert.Equal(t, "9007199254740993", formatScalar(t, m["amount"]))
 
 	assert.Nil(t, shared.DecodeBody(nil, "application/json"))
 	assert.Equal(t, `{"a":1} trailing`, shared.DecodeBody([]byte(`{"a":1} trailing`), "application/json"))

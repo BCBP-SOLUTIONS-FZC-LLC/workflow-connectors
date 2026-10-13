@@ -61,3 +61,42 @@ func TestBuildRawMIME_WithAttachment_IsMultipart(t *testing.T) {
 	assert.Contains(t, msg, "application/pdf")
 	assert.True(t, strings.Contains(msg, "hello"))
 }
+
+// An attachment's stored content type reaches a part header only parsed and
+// re-formatted; one that does not parse is application/octet-stream, so it
+// can never inject header text.
+func TestBuildRawMIME_AttachmentContentType_IsNormalised(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"application/pdf":                     "application/pdf",
+		"Text/CSV; Charset=UTF-8":             "text/csv; charset=UTF-8",
+		"text/plain; name=\"a b.txt\"":        `text/plain; name="a b.txt"`,
+		"":                                    "application/octet-stream",
+		"application/pdf\r\nBcc: evil@x.test": "application/octet-stream",
+		"not a media type":                    "application/octet-stream",
+		"text/plain; charset=\"unterminated":  "application/octet-stream",
+	}
+	for stored, want := range cases {
+		raw := string(buildRawMIME(sendemail.EmailMessage{
+			SenderEmail: "a@example.com", ReceiverEmail: "b@example.com", Body: "hello",
+			Attachments: []sendemail.EmailAttachment{{Filename: "a", ContentType: stored, Content: []byte("x")}},
+		}))
+		assert.Containsf(t, raw, "\r\nContent-Type: "+want+"\r\n", "stored %q", stored)
+		for _, line := range strings.Split(raw, "\r\n") {
+			assert.Falsef(t, strings.HasPrefix(line, "Bcc:"), "stored %q injected a header", stored)
+		}
+	}
+	assert.Equal(t, "application/octet-stream", attachmentMediaType("/"))
+}
+
+// The body's media type is text/html or text/plain, never the raw input.
+func TestBuildRawMIME_BodyContentType_OnlyTheEnum(t *testing.T) {
+	t.Parallel()
+
+	for input, want := range map[string]string{"text/html": "text/html", "text/plain": "text/plain", "": "text/plain", "text/html\r\nBcc: x@y.test": "text/plain"} {
+		raw := string(buildRawMIME(sendemail.EmailMessage{SenderEmail: "a@example.com", ReceiverEmail: "b@example.com", Body: "hello", ContentType: input}))
+		assert.Containsf(t, raw, "Content-Type: "+want+"; charset=UTF-8\r\n", "input %q", input)
+		assert.NotContains(t, raw, "Bcc:")
+	}
+}

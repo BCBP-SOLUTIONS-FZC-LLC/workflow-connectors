@@ -38,6 +38,8 @@ type fakeDriveServer struct {
 	listStatus int                       // non-zero: GET /files fails with this status
 	listPages  map[string]map[string]any // pageToken ("" for the first) -> response body
 	media      map[string]string         // fileID -> content served by alt=media
+	meta       map[string]map[string]any // fileID -> metadata served by files.get
+	lastFields string                    // the fields parameter of the last files.get
 	status     map[string]int            // "METHOD fileID" -> forced status
 	created    map[string]map[string]any // fileID -> metadata seen on create
 	updated    map[string]map[string]any // fileID -> metadata seen on update
@@ -51,6 +53,7 @@ func newFakeDriveServer(t *testing.T) (*fakeDriveServer, *realDriveFilesAPI) {
 		t:         t,
 		listPages: map[string]map[string]any{},
 		media:     map[string]string{},
+		meta:      map[string]map[string]any{},
 		status:    map[string]int{},
 		created:   map[string]map[string]any{},
 		updated:   map[string]map[string]any{},
@@ -103,6 +106,16 @@ func (s *fakeDriveServer) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/pdf")
 		_, _ = io.WriteString(w, content)
+
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/files/"):
+		s.lastFields = r.URL.Query().Get("fields")
+		meta, ok := s.meta[id]
+		if !ok {
+			writeAPIError(w, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(meta)
 
 	case r.Method == http.MethodPost && path == "/files":
 		meta, content := s.readMultipart(r)
@@ -170,7 +183,7 @@ func TestRealDrive_FindOne(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, &driveFile{ID: "f1", MimeType: "application/pdf", DocumentID: "doc-1"}, f)
 
-	assert.Equal(t, `'fold\'er' in parents and name = 'a.pdf' and trashed = false`, srv.queries[0])
+	assert.Equal(t, `'fold\'er' in parents and name = 'a.pdf' and trashed = false and mimeType != 'application/vnd.google-apps.folder' and mimeType != 'application/vnd.google-apps.shortcut'`, srv.queries[0])
 	assert.Equal(t, `'folder' in parents and appProperties has { key='connectorDocumentId' and value='doc-1' } and trashed = false`, srv.queries[2])
 
 	// A Drive error is returned as is.
@@ -214,7 +227,7 @@ func TestRealDrive_ListByName_FollowsPagesWithTags(t *testing.T) {
 	files, err := api.listByName(context.Background(), "folder", "a.pdf")
 	require.NoError(t, err)
 	assert.Equal(t, []*driveFile{{ID: "f1", DocumentID: "doc-1"}, {ID: "f2"}}, files)
-	assert.Equal(t, `'folder' in parents and name = 'a.pdf' and trashed = false`, srv.queries[0])
+	assert.Equal(t, `'folder' in parents and name = 'a.pdf' and trashed = false and mimeType != 'application/vnd.google-apps.folder' and mimeType != 'application/vnd.google-apps.shortcut'`, srv.queries[0])
 }
 
 func TestRealDrive_Download(t *testing.T) {

@@ -13,7 +13,8 @@
 # (docs.yml checks those with `make docs-check`). NOT documentation: any other
 # file under docs/architecture/ (a .go file there would be a package of the
 # module), and every file outside those patterns — Go code, SQL migrations,
-# YAML, scripts, the Makefile, go.mod.
+# YAML, scripts, the Makefile, go.mod — and docs/integration/connector-worker.md,
+# whose Go skeleton validate-quality.yml compiles (`make docs-compile`).
 #
 # Every path of the change is judged: the diff runs with --no-renames, so a
 # rename or move is listed as a deletion of the old path plus an addition of
@@ -36,6 +37,7 @@ set -euo pipefail
 
 is_docs() {
   case "$1" in
+    docs/integration/connector-worker.md) return 1 ;;
     docs/architecture/*.mmd) return 0 ;;
     docs/architecture/*) [[ "$1" == *.md ]] ;;
     *.md) return 0 ;;

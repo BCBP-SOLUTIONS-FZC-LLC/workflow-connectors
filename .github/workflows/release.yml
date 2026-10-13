@@ -67,7 +67,7 @@ jobs:
   # ── fail fast: a wrong tag or a missing CHANGELOG section stops everything
   verify:
     name: Verify tag + CHANGELOG
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -114,7 +114,7 @@ jobs:
   # release (apidiff vs the highest stable tag below this one).
   api-compat:
     name: API compatibility
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: verify
     timeout-minutes: 10
     steps:
@@ -148,7 +148,7 @@ jobs:
   # ── same as ci.yml: no-op placeholder (no Dockerfile / image) ────────────
   build-image-cache:
     name: Build image (cache)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: verify
     timeout-minutes: 2
     steps:
@@ -158,7 +158,7 @@ jobs:
   # ── same as ci.yml: gates on validate-test + build-image ─────────────────
   smoke-tests:
     name: Smoke tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [verify, validate-test, build-image-cache]
     timeout-minutes: 2
     steps:
@@ -168,7 +168,7 @@ jobs:
   # ── gates on validate-test + build-image: dependency CVE scan + SBOM ─────
   trivy:
     name: Trivy CVE scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [verify, validate-test, build-image-cache]
     timeout-minutes: 15
     permissions:
@@ -183,11 +183,18 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
+      # A cache key is immutable: a fixed key would be saved once and the
+      # vulnerability DB never refreshed in the cache. One key per UTC day
+      # saves the day's DB; restore-keys falls back to the latest earlier one.
+      - name: Trivy DB cache date
+        id: trivy-date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Cache Trivy DB
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/trivy-cache
-          key: trivy-db-${{ runner.os }}
+          key: trivy-db-${{ runner.os }}-${{ steps.trivy-date.outputs.date }}
           restore-keys: |
             trivy-db-${{ runner.os }}-
 
@@ -241,7 +248,7 @@ jobs:
   # ── needs both validation gates (platform-pgcommon's "Build binaries") ───
   build-source-archive:
     name: Build source archive
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [validate-test, validate-quality]
     timeout-minutes: 5
     steps:
@@ -271,7 +278,7 @@ jobs:
   # ── release-only: the GitHub Release consuming services see ──────────────
   publish:
     name: GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [verify, validate-test, validate-quality, api-compat, trivy, smoke-tests, build-source-archive]
     timeout-minutes: 10
     permissions:

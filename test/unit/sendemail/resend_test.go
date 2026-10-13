@@ -69,6 +69,8 @@ func TestSendEmail_DuplicateOfAccepted_Succeeds(t *testing.T) {
 
 	out, err := conn.Execute(ctx, emailInput("messageKey", "welcome-1"))
 	require.NoError(t, err, "a duplicate of an accepted send is a success")
+	accepted, _, err := intents.Get(ctx, "t", "welcome-1")
+	require.NoError(t, err)
 	assert.Equal(t, map[string]any{
 		"sent":              false,
 		"duplicate":         true,
@@ -76,7 +78,11 @@ func TestSendEmail_DuplicateOfAccepted_Succeeds(t *testing.T) {
 		"status":            "accepted",
 		"attempts":          1,
 		"providerMessageId": first["messageId"],
-		"deliveryOutcome":   "accepted",
+		// The fields a send returns, from the accepted attempt, so a later
+		// step reads the same output after a redelivery.
+		"messageId":       first["messageId"],
+		"sentAt":          accepted.UpdatedAt.UTC(),
+		"deliveryOutcome": "accepted",
 	}, out)
 	assert.Len(t, client.Sent(), 1, "nothing sent again")
 }

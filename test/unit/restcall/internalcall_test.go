@@ -69,7 +69,7 @@ func TestRestCall_QueryParamCannotOverrideTemplate(t *testing.T) {
 
 	_, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "queryParams": map[string]any{"page": 2.0}})
 	require.NoError(t, err)
-	assert.Equal(t, "page=2&scope=own", gotQuery.Load())
+	assert.Equal(t, "scope=own&page=2", gotQuery.Load())
 }
 
 // The status alone classifies an error response: an oversized error page

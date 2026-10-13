@@ -67,7 +67,7 @@ func TestPostgres_PoolClosed_IsUnknown(t *testing.T) {
 }
 
 // Every store statement runs in a transaction pgcommon opens, so the pool's
-// LockTimeout bounds Reserve and Record, directly and through PgBouncer.
+// LockTimeout bounds Reserve, Record and Release, directly and through PgBouncer.
 func TestPostgres_LockTimeout_BoundsEveryCall(t *testing.T) {
 	t.Parallel()
 	base := postgres(t)
@@ -115,6 +115,7 @@ func TestPostgres_LockTimeout_BoundsEveryCall(t *testing.T) {
 				"record": func(ctx context.Context) error {
 					return store.Record(ctx, in.ID, in.Attempts, sendintent.StatusAccepted, "m", "")
 				},
+				"release": func(ctx context.Context) error { _, err := store.Release(ctx, tenant, "k", "tok"); return err },
 			} {
 				bounded, cancel := context.WithTimeout(ctx, 10*time.Second) // never hang the suite
 				err := run(bounded)

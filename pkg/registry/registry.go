@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -83,15 +84,55 @@ type Definition struct {
 	Retry       RetryPolicy
 }
 
+// All returns the definitions of the connector types a workflow may be
+// authored with: storage, send-email and rest-call. chat-notify is
+// deliberately absent (see ChatNotifyDefinition), as are sql-query and
+// document-extract, which have no definition.
 func All() map[string]Definition {
 	defs := []Definition{
 		storageDefinition(),
 		sendEmailDefinition(),
 		restCallDefinition(),
-		chatNotifyDefinition(),
 	}
 
 	return indexByType(defs)
+}
+
+// Lookup returns the definition of connectorType: any type in All(), plus
+// chat-notify (ChatNotifyDefinition), which connectors.New still builds.
+// Runtime code deciding about a connector's result (retry policy) uses
+// Lookup; authoring uses All. Lookup is called on every failed task, so the
+// definitions are built once; each call returns a copy (its Inputs, Outputs
+// and EnumValues slices included) that the caller may modify freely.
+func Lookup(connectorType string) (Definition, bool) {
+	def, ok := lookupDefs[connectorType]
+	if !ok {
+		return Definition{}, false
+	}
+	return cloneDefinition(def), true
+}
+
+// lookupDefs holds every definition Lookup serves, built once. It is never
+// handed out: Lookup returns clones.
+var lookupDefs = func() map[string]Definition {
+	defs := All()
+	chat := ChatNotifyDefinition()
+	defs[chat.Type] = chat
+	return defs
+}()
+
+func cloneDefinition(d Definition) Definition {
+	d.Inputs = cloneFields(d.Inputs)
+	d.Outputs = cloneFields(d.Outputs)
+	return d
+}
+
+func cloneFields(fields []Field) []Field {
+	out := slices.Clone(fields)
+	for i := range out {
+		out[i].EnumValues = slices.Clone(out[i].EnumValues)
+	}
+	return out
 }
 
 // indexByType keys definitions by Type, panicking on a duplicate: two

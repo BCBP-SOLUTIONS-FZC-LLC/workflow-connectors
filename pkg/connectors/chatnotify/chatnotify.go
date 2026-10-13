@@ -1,3 +1,15 @@
+// Package chatnotify is the chat-notify connector core (create a channel,
+// invite users, post a message).
+//
+// It is not offered for authoring: registry.All() omits chat-notify (its
+// definition stays available as registry.ChatNotifyDefinition) because no
+// provider adapter exists and the ProviderClient port cannot carry a tenant's
+// credential. connectors.New still builds the connector, and with a nil
+// client every call fails with ErrValidation. Before a Slack or Teams
+// provider ships, the port will gain per-call credentials (the tenant's
+// authToken, resolved by the worker from OpenBao) and messageBlock support —
+// a breaking change to ProviderClient, made together with re-listing the type
+// in registry.All().
 package chatnotify
 
 import (

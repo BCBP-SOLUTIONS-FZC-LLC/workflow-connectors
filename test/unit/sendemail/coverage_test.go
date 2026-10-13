@@ -3,6 +3,7 @@ package sendemail_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,22 +51,29 @@ func TestSendEmail_SendIntentReserveFailure_IsNotDeliveredAndNothingSent(t *test
 	assert.Empty(t, client.Sent())
 }
 
-// A validation failure after the intent was reserved (here an unconfigured
-// provider) sent nothing: not_delivered, in the output and on the intent, so
-// the same messageKey may be tried again.
+// A validation failure after the intent was reserved (here the provider
+// rejecting its credential while the client is built) sent nothing:
+// not_delivered, in the output and on the intent, so the same messageKey may
+// be tried again. A missing or unconfigured provider is refused before the
+// reservation (TestSendEmail_InvalidProvider_ReservesNothing).
 func TestSendEmail_ValidationFailureAfterReserve_RecordsNotDelivered(t *testing.T) {
 	t.Parallel()
 
 	intents := sendintent.NewMemoryStore()
-	conn := sendemail.New(providersFor(sendemail.NewMockSendEmailClient()), docref.NewMemoryService(), sendemail.WithSendIntents(intents))
-	out, err := conn.Execute(shared.WithTenant(context.Background(), "t"), emailInput("messageKey", "k", "provider", "unconfigured"))
+	providers := map[string]sendemail.ProviderConstructor{
+		"sendgrid": func(context.Context, map[string]any) (sendemail.ProviderClient, error) {
+			return nil, fmt.Errorf("%w: apiKey is malformed", shared.ErrValidation)
+		},
+	}
+	conn := sendemail.New(providers, docref.NewMemoryService(), sendemail.WithSendIntents(intents))
+	out, err := conn.Execute(shared.WithTenant(context.Background(), "t"), emailInput("messageKey", "k"))
 
 	assert.ErrorIs(t, err, shared.ErrValidation)
 	assert.Equal(t, "not_delivered", out["deliveryOutcome"])
 	got, ok, _ := intents.Get(context.Background(), "t", "k")
 	require.True(t, ok)
 	assert.Equal(t, sendintent.StatusNotDelivered, got.Status)
-	assert.Contains(t, got.Detail, "not configured")
+	assert.Contains(t, got.Detail, "apiKey is malformed")
 }
 
 func TestSendEmail_Attachments_NeedDocRefServiceAndTenant(t *testing.T) {

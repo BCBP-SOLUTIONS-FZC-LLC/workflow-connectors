@@ -10,17 +10,16 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/registry"
 )
 
-func TestAll_FourTypes(t *testing.T) {
+func TestAll_ThreeAuthorableTypes(t *testing.T) {
 	t.Parallel()
 
 	defs := registry.All()
-	require.Len(t, defs, 4)
+	require.Len(t, defs, 3)
 
 	wantTypes := []string{
 		registry.TypeStorage,
 		registry.TypeSendEmail,
 		registry.TypeRestCall,
-		registry.TypeChatNotify,
 	}
 	for _, want := range wantTypes {
 		def, ok := defs[want]
@@ -31,6 +30,56 @@ func TestAll_FourTypes(t *testing.T) {
 		assert.NotEmpty(t, def.Outputs)
 		assert.NotEmpty(t, def.Retry)
 	}
+	for _, absent := range []string{registry.TypeChatNotify, registry.TypeSQLQuery, registry.TypeDocumentExtract} {
+		assert.NotContains(t, defs, absent, "%s cannot be authored", absent)
+	}
+}
+
+// chat-notify is not authorable but connectors.New still builds it: Lookup
+// keeps its definition (and unsafe policy) reachable for DecideRetry.
+func TestLookup(t *testing.T) {
+	t.Parallel()
+
+	for typ, want := range registry.All() {
+		got, ok := registry.Lookup(typ)
+		require.True(t, ok, typ)
+		assert.Equal(t, want, got, typ)
+	}
+	chat, ok := registry.Lookup(registry.TypeChatNotify)
+	require.True(t, ok)
+	assert.Equal(t, registry.ChatNotifyDefinition(), chat)
+	assert.Equal(t, registry.TypeChatNotify, chat.Type)
+
+	for _, typ := range []string{registry.TypeSQLQuery, registry.TypeDocumentExtract, "", "nope"} {
+		_, ok := registry.Lookup(typ)
+		assert.False(t, ok, typ)
+	}
+}
+
+// Lookup serves definitions built once; what it returns is a copy, so a
+// caller modifying it (slices included) never changes what the next call sees.
+func TestLookup_ReturnsIndependentCopies(t *testing.T) {
+	t.Parallel()
+
+	for _, typ := range []string{registry.TypeStorage, registry.TypeSendEmail, registry.TypeRestCall, registry.TypeChatNotify} {
+		first, ok := registry.Lookup(typ)
+		require.True(t, ok, typ)
+		require.NotEmpty(t, first.Inputs, typ)
+		want, _ := registry.Lookup(typ)
+
+		first.Retry = "changed"
+		first.Inputs[0].Name = "changed"
+		first.Outputs = append(first.Outputs[:0], registry.Field{Name: "changed"})
+		for i := range first.Inputs {
+			for j := range first.Inputs[i].EnumValues {
+				first.Inputs[i].EnumValues[j] = "changed"
+			}
+		}
+
+		again, ok := registry.Lookup(typ)
+		require.True(t, ok, typ)
+		assert.Equal(t, want, again, typ)
+	}
 }
 
 func TestAll_RetryPolicies(t *testing.T) {
@@ -40,7 +89,7 @@ func TestAll_RetryPolicies(t *testing.T) {
 	assert.Equal(t, registry.RetryPolicySafe, defs[registry.TypeStorage].Retry)
 	assert.Equal(t, registry.RetryPolicyNotDelivered, defs[registry.TypeSendEmail].Retry)
 	assert.Equal(t, registry.RetryPolicyConditional, defs[registry.TypeRestCall].Retry)
-	assert.Equal(t, registry.RetryPolicyUnsafe, defs[registry.TypeChatNotify].Retry)
+	assert.Equal(t, registry.RetryPolicyUnsafe, registry.ChatNotifyDefinition().Retry)
 }
 
 func fieldByName(t *testing.T, fields []registry.Field, name string) registry.Field {
@@ -73,8 +122,8 @@ func TestAll_FieldContents(t *testing.T) {
 		in, out := defs[registry.TypeStorage].Inputs, defs[registry.TypeStorage].Outputs
 		provider := fieldByName(t, in, "provider")
 		assert.Equal(t, registry.FieldKindEnum, provider.Kind)
-		assert.False(t, provider.Required)
-		assert.Equal(t, []string{"aws-s3", "azure-blob", "gcp-gcs", "google-drive"}, provider.EnumValues, "order is the default — aws-s3 must stay first")
+		assert.True(t, provider.Required, "every call names its provider: there is no default (LLD Decision #20)")
+		assert.Equal(t, []string{"aws-s3", "azure-blob", "gcp-gcs", "google-drive"}, provider.EnumValues)
 		assert.True(t, fieldByName(t, in, "accessKey").IsSecretRef())
 		assert.True(t, fieldByName(t, in, "secretKey").IsSecretRef())
 		for _, name := range []string{"azureAccountName", "azureAccountKey", "gcpServiceAccountKey", "driveServiceAccountKey"} {
@@ -95,7 +144,7 @@ func TestAll_FieldContents(t *testing.T) {
 		in, out := defs[registry.TypeSendEmail].Inputs, defs[registry.TypeSendEmail].Outputs
 		provider := fieldByName(t, in, "provider")
 		assert.Equal(t, registry.FieldKindEnum, provider.Kind)
-		assert.False(t, provider.Required)
+		assert.True(t, provider.Required, "every call names its provider: there is no default (LLD Decision #20)")
 		assert.Equal(t, []string{"sendgrid", "aws-ses", "microsoft-365", "google-workspace"}, provider.EnumValues)
 		assert.True(t, fieldByName(t, in, "apiKey").IsSecretRef())
 		assert.True(t, fieldByName(t, in, "accessKey").IsSecretRef())
@@ -115,7 +164,9 @@ func TestAll_FieldContents(t *testing.T) {
 
 	t.Run("rest-call", func(t *testing.T) {
 		t.Parallel()
-		in := defs[registry.TypeRestCall].Inputs
+		in, out := defs[registry.TypeRestCall].Inputs, defs[registry.TypeRestCall].Outputs
+		assert.Equal(t, registry.FieldKindString, fieldByName(t, out, "method").Kind)
+		assert.Equal(t, registry.FieldKindBool, fieldByName(t, out, "bodyTruncated").Kind)
 		alias := fieldByName(t, in, "endpointAlias")
 		assert.Equal(t, registry.FieldKindString, alias.Kind)
 		assert.True(t, alias.Required)
@@ -126,7 +177,7 @@ func TestAll_FieldContents(t *testing.T) {
 
 	t.Run("chat-notify", func(t *testing.T) {
 		t.Parallel()
-		in := defs[registry.TypeChatNotify].Inputs
+		in := registry.ChatNotifyDefinition().Inputs
 		assert.False(t, hasField(in, "provider"), "no real per-provider implementation exists yet")
 		assert.True(t, fieldByName(t, in, "authToken").IsSecretRef())
 		method := fieldByName(t, in, "method")

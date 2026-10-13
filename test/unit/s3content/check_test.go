@@ -48,3 +48,32 @@ func TestCheck_PassesUnderPrefixScopedPolicy(t *testing.T) {
 	assert.NoError(t, s.Check(context.Background(), "docrefs/"))
 	assert.Error(t, s.Check(context.Background(), ""), "a probe outside the granted prefix is refused, as S3 would")
 }
+
+// recordingS3 records the probe keys Check uses.
+type recordingS3 struct {
+	leastPrivilegeS3
+	keys *[]string
+}
+
+func (r recordingS3) PutObject(ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	*r.keys = append(*r.keys, aws.ToString(in.Key))
+	return r.leastPrivilegeS3.PutObject(ctx, in, opts...)
+}
+
+// Every check probes its own random key under the prefix, so replicas
+// starting together never share (and race on) one probe object.
+func TestCheck_ProbeKeysAreRandom(t *testing.T) {
+	t.Parallel()
+	var keys []string
+	s := s3content.New(recordingS3{leastPrivilegeS3{prefix: "docrefs/"}, &keys}, "docs")
+	for range 50 {
+		assert.NoError(t, s.Check(context.Background(), "docrefs/"))
+	}
+	seen := map[string]bool{}
+	for _, k := range keys {
+		assert.True(t, strings.HasPrefix(k, "docrefs/.docref-check/"), k)
+		assert.False(t, seen[k], "duplicate probe key %s", k)
+		seen[k] = true
+	}
+	assert.Len(t, seen, 50)
+}

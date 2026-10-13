@@ -12,11 +12,10 @@ package s3content
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -48,21 +47,33 @@ func (s *Store) Bucket() string { return s.bucket }
 // s3:ListBucket S3 answers 403 for a missing object, which would make a
 // deleted document look like a transient access failure, retried forever.
 //
+// It then writes and deletes an empty object at the probe key, so missing
+// s3:PutObject or s3:DeleteObject (which Create and Delete need) fails at
+// startup rather than on the first document. A probe object left behind by a
+// failed delete is removed by the bucket lifecycle rule.
+//
 // keyPrefix is the document key prefix the service writes under (the value
-// given to docref.WithKeyPrefix): the probe reads a random key beneath it, so
+// given to docref.WithKeyPrefix): the probe uses a random key beneath it, so
 // it needs no permission beyond the documented <bucket>/<prefix>* grant.
 func (s *Store) Check(ctx context.Context, keyPrefix string) error {
 	if _, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)}); err != nil {
 		return fmt.Errorf("docref: document bucket %q unreachable: %w", s.bucket, err)
 	}
-	probe := keyPrefix + ".docref-check/" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	// A random key, so concurrent checks (replicas starting together) never
+	// share a probe object.
+	probe := keyPrefix + ".docref-check/" + rand.Text()
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(probe)})
-	if err == nil {
+	switch {
+	case err == nil:
 		_ = out.Body.Close()
-		return nil
-	}
-	if !isNotFound(err) {
+	case !isNotFound(err):
 		return fmt.Errorf("docref: a missing object in %q does not read as NoSuchKey (grant s3:ListBucket on the bucket): %w", s.bucket, err)
+	}
+	if err := s.Put(ctx, probe, nil, ""); err != nil {
+		return fmt.Errorf("docref: cannot write documents under %q in %q (grant s3:PutObject): %w", keyPrefix, s.bucket, err)
+	}
+	if err := s.Delete(ctx, s.bucket, probe); err != nil {
+		return fmt.Errorf("docref: cannot delete documents under %q in %q (grant s3:DeleteObject): %w", keyPrefix, s.bucket, err)
 	}
 	return nil
 }

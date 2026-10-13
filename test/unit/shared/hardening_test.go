@@ -21,13 +21,13 @@ func TestFormatParam_JSONNumbersHaveNoExponent(t *testing.T) {
 	var in map[string]any
 	require.NoError(t, json.Unmarshal([]byte(`{"id": 1234567, "big": 9007199254740991, "frac": 0.000015, "neg": -42}`), &in))
 
-	assert.Equal(t, "1234567", shared.FormatParam(in["id"]))
-	assert.Equal(t, "9007199254740991", shared.FormatParam(in["big"]))
-	assert.Equal(t, "0.000015", shared.FormatParam(in["frac"]))
-	assert.Equal(t, "-42", shared.FormatParam(in["neg"]))
-	assert.Equal(t, "77", shared.FormatParam(json.Number("77")))
-	assert.Equal(t, "abc", shared.FormatParam("abc"))
-	assert.Equal(t, "true", shared.FormatParam(true))
+	assert.Equal(t, "1234567", formatScalar(t, in["id"]))
+	assert.Equal(t, "9007199254740991", formatScalar(t, in["big"]))
+	assert.Equal(t, "0.000015", formatScalar(t, in["frac"]))
+	assert.Equal(t, "-42", formatScalar(t, in["neg"]))
+	assert.Equal(t, "77", formatScalar(t, json.Number("77")))
+	assert.Equal(t, "abc", formatScalar(t, "abc"))
+	assert.Equal(t, "true", formatScalar(t, true))
 }
 
 func TestRenderPathTemplate_NumericParam(t *testing.T) {

@@ -44,7 +44,7 @@ jobs:
   quality:
     name: quality
     if: ${{ !inputs.skip }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -135,7 +135,8 @@ jobs:
       - name: Cache go-arch-lint binary
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/go/bin/go-arch-lint
+          # Must match arch-lint.sh's GO_ARCH_LINT_DIR default and version.
+          path: ~/.cache/workflow-connectors/go-arch-lint/v1.15.0
           key: go-arch-lint-${{ runner.os }}-v1.15.0
 
       - name: Architecture lint
@@ -145,6 +146,12 @@ jobs:
       # verbatim; a diagram edited in one place only fails here.
       - name: Architecture diagrams in sync
         run: make docs-check
+
+      # The worker skeleton in docs/integration/connector-worker.md compiles
+      # against this checkout (scratch module + replace; no network beyond
+      # the modules already downloaded), so the wiring guide cannot drift.
+      - name: Integration guide skeleton compiles
+        run: make docs-compile
 
       # Regression tests for the CI scripts: detect-changes.sh's docs-only
       # decision (renames, moves, deletions, spaces, '::' paths) and its log

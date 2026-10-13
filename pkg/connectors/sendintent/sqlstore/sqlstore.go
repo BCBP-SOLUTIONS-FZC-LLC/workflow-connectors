@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
@@ -67,7 +68,7 @@ func (s *Store) Reserve(ctx context.Context, tenantID, messageKey string, resend
 		   OR ($3 > 0 AND connector_send_intents.attempts = $3
 		       AND (connector_send_intents.status <> 'pending'
 		            OR connector_send_intents.updated_at <= now() - make_interval(secs => $5)))`
-	in, err := s.queryOne(ctx, `
+	in, maybeCommitted, err := s.query(ctx, `
 		INSERT INTO connector_send_intents (tenant_id, message_key, status, reservation_token)
 		VALUES ($1, $2, 'pending', $4)
 		ON CONFLICT ON CONSTRAINT uq_connector_send_intents_key `+conflict+`
@@ -76,11 +77,21 @@ func (s *Store) Reserve(ctx context.Context, tenantID, messageKey string, resend
 		return in, true, nil
 	}
 	if !errors.Is(err, pgcommon.ErrNoRows) {
+		if !maybeCommitted {
+			// The failure came before COMMIT was sent (acquiring a
+			// connection, BEGIN, the transaction's timeout or GUC setup, the
+			// statement itself): nothing was reserved. Only a failure after
+			// the statement succeeded — COMMIT failed or its reply was lost —
+			// is ambiguous, and left unmarked.
+			return sendintent.Intent{}, false, fmt.Errorf("sendintent: reserve: %w: %w", sendintent.ErrNotReserved, classify(err))
+		}
 		return sendintent.Intent{}, false, fmt.Errorf("sendintent: reserve: %w", classify(err))
 	}
+	// The upsert changed nothing: this call reserved nothing, whatever the
+	// read-back of the existing intent does.
 	in, err = s.queryOne(ctx, `SELECT `+columns+` FROM connector_send_intents WHERE tenant_id = $1 AND message_key = $2`, tenantID, messageKey)
 	if err != nil {
-		return sendintent.Intent{}, false, fmt.Errorf("sendintent: reserve: load existing: %w", classify(err))
+		return sendintent.Intent{}, false, fmt.Errorf("sendintent: reserve: load existing: %w: %w", sendintent.ErrNotReserved, classify(err))
 	}
 	return in, false, nil
 }
@@ -94,7 +105,12 @@ func (s *Store) Record(ctx context.Context, intentID string, attempt int, status
 		WHERE id = $1::uuid AND attempts = $2 AND status = 'pending'
 		RETURNING `+columns, intentID, attempt, string(status), providerMessageID, detail)
 	if errors.Is(err, pgcommon.ErrNoRows) {
-		if _, found, getErr := s.byID(ctx, intentID); getErr == nil && found {
+		_, found, getErr := s.byID(ctx, intentID)
+		switch {
+		case getErr != nil:
+			// A failed lookup is not a missing intent.
+			return fmt.Errorf("sendintent: record: load intent: %w", classify(getErr))
+		case found:
 			return sendintent.ErrStaleRecord
 		}
 		return sendintent.ErrIntentNotFound
@@ -103,6 +119,68 @@ func (s *Store) Record(ctx context.Context, intentID string, attempt int, status
 		return fmt.Errorf("sendintent: record: %w", classify(err))
 	}
 	return nil
+}
+
+// Release marks the intent not_delivered when it is still pending under
+// token (sendintent.Releaser): one conditional statement, so it can never
+// release another caller's reservation or overwrite a recorded outcome.
+// released reports whether it changed the intent.
+func (s *Store) Release(ctx context.Context, tenantID, messageKey, token string) (bool, error) {
+	if token == "" {
+		return false, sendintent.ErrNoToken
+	}
+	_, err := s.queryOne(ctx, `
+		UPDATE connector_send_intents
+		SET status = 'not_delivered', detail = $4, updated_at = now()
+		WHERE tenant_id = $1 AND message_key = $2 AND reservation_token = $3 AND status = 'pending'
+		RETURNING `+columns, tenantID, messageKey, token, sendintent.ReleasedDetail)
+	switch {
+	case errors.Is(err, pgcommon.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("sendintent: release: %w", classify(err))
+	}
+	return true, nil
+}
+
+// PruneIntents deletes finished (not pending) intents last updated more than
+// olderThan ago, at most batch rows per call, and returns how many it
+// deleted. connector_send_intents otherwise grows with every send that
+// carries a messageKey: run it on a schedule, repeating while it returns
+// batch. Pruning reopens the duplicate window: a request with a pruned
+// intent's messageKey is a new message and is sent again, so keep intents
+// longer than any redelivery or replay of a workflow step can arrive (days,
+// not minutes). Pending intents are never pruned (an operator resolves a
+// stuck one with an explicit resend).
+//
+// The outer DELETE repeats the subquery's conditions: under READ COMMITTED a
+// row the subquery picked that a concurrent Reserve re-reserves meanwhile
+// (pending again, updated_at = now()) is re-checked against the DELETE's own
+// WHERE only once the Reserve commits, so without them the re-reserved
+// intent would be deleted and a redelivered job would send the email again.
+// FOR UPDATE SKIP LOCKED leaves a row another transaction holds to the next
+// run. The partial index ix_connector_send_intents_prune serves the scan.
+func (s *Store) PruneIntents(ctx context.Context, olderThan time.Duration, batch int) (int64, error) {
+	if olderThan <= 0 || batch <= 0 {
+		return 0, sendintent.ErrPruneArgs
+	}
+	var deleted int64
+	err := pgcommon.RunInTx(ctx, s.pool, pgcommon.TxOptions{}, func(ctx context.Context, tx pgcommon.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM connector_send_intents
+			WHERE id IN (
+				SELECT id FROM connector_send_intents
+				WHERE status <> 'pending' AND updated_at < now() - make_interval(secs => $1)
+				LIMIT $2
+				FOR UPDATE SKIP LOCKED)
+			  AND status <> 'pending' AND updated_at < now() - make_interval(secs => $1)`, olderThan.Seconds(), batch)
+		deleted = tag.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("sendintent: prune intents: %w", classify(err))
+	}
+	return deleted, nil
 }
 
 // Get returns the intent for tenant + messageKey.
@@ -130,17 +208,31 @@ func (s *Store) byID(ctx context.Context, intentID string) (sendintent.Intent, b
 }
 
 func (s *Store) queryOne(ctx context.Context, stmt string, args ...any) (sendintent.Intent, error) {
-	var in sendintent.Intent
-	err := pgcommon.RunInTx(ctx, s.pool, pgcommon.TxOptions{}, func(ctx context.Context, tx pgcommon.Tx) error {
+	in, _, err := s.query(ctx, stmt, args...)
+	return in, err
+}
+
+// query runs stmt, which returns one intent, in its own transaction.
+// maybeCommitted reports, with an error, that the statement succeeded and
+// RunInTx still failed: only COMMIT (or the check pgcommon makes just before
+// it) can fail then, so whether the write committed is unknown. Any error
+// before that point — acquiring a connection (pool exhausted, closed,
+// context expired), BEGIN, the transaction's timeouts or GUCs, the statement
+// itself — left the transaction uncommitted (pgcommon.RunInTx sends COMMIT
+// only after the callback returned nil).
+func (s *Store) query(ctx context.Context, stmt string, args ...any) (in sendintent.Intent, maybeCommitted bool, err error) {
+	callbackDone := false
+	err = pgcommon.RunInTx(ctx, s.pool, pgcommon.TxOptions{}, func(ctx context.Context, tx pgcommon.Tx) error {
 		var status string
 		if err := tx.QueryRow(ctx, stmt, args...).Scan(&in.ID, &in.TenantID, &in.MessageKey, &status, &in.Attempts,
 			&in.ReservationToken, &in.ProviderMessageID, &in.Detail, &in.CreatedAt, &in.UpdatedAt); err != nil {
 			return err
 		}
 		in.Status = sendintent.Status(status)
+		callbackDone = true
 		return nil
 	})
-	return in, err
+	return in, err != nil && callbackDone, err
 }
 
 // classify attaches a retry class to a database error, as the document
@@ -169,4 +261,7 @@ func classify(err error) error {
 	return shared.ClassifyByCause(err)
 }
 
-var _ sendintent.Store = (*Store)(nil)
+var (
+	_ sendintent.Store    = (*Store)(nil)
+	_ sendintent.Releaser = (*Store)(nil)
+)
