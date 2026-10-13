@@ -74,9 +74,3 @@ func TestClassifyError_RateLimit403_IsTransientNotDelivered(t *testing.T) {
 	unavailable := classifyError(&googleapi.Error{Code: http.StatusServiceUnavailable, Errors: []googleapi.ErrorItem{{Reason: "rateLimitExceeded"}}}, nil)
 	assert.ErrorIs(t, unavailable, shared.ErrDeliveryUnknown)
 }
-
-func TestGmailClient_MaxAttachmentBytes(t *testing.T) {
-	t.Parallel()
-	var limiter sendemail.AttachmentLimiter = &gmailClient{}
-	assert.Equal(t, int64(25<<20), limiter.MaxAttachmentBytes())
-}

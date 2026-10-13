@@ -75,6 +75,11 @@ type Connector struct {
 	intents   sendintent.Store
 
 	clients *shared.ClientCache[ProviderClient]
+
+	// now and preSendBudget bound the stage between a reservation and the
+	// provider call (preSendDeadline); tests shorten them.
+	now           func() time.Time
+	preSendBudget time.Duration
 }
 
 // Option configures a Connector.
@@ -92,6 +97,9 @@ func New(providers map[string]ProviderConstructor, docRefs *docref.Service, opts
 		providers: providers,
 		docRefs:   docRefs,
 		clients:   shared.NewClientCache[ProviderClient](clientCacheLimit),
+
+		now:           time.Now,
+		preSendBudget: preSendBudget,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -131,6 +139,9 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 	if err := validateBodyContentType(shared.StringField(input, "contentType")); err != nil {
 		return s.finish(ctx, nil, "", err)
 	}
+	if err := validateSize(body, shared.StringField(input, "subject")); err != nil {
+		return s.finish(ctx, nil, "", err)
+	}
 
 	// Optional duplicate-request protection: reserve the caller's messageKey
 	// before anything else is done for the send. A redelivered job for an
@@ -147,16 +158,23 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 	// From here every failure is recorded on the intent (not_delivered for
 	// a validation or document-ref failure: nothing was sent), a panic too.
 	g := &guard{s: s, ctx: ctx, intent: intent, provider: provider}
+	// prepCtx bounds the work done before the send while an intent is
+	// reserved (see preSendBudget); without one it is the call's context.
+	prepCtx, reservedAt := ctx, time.Time{}
 	if intent != nil {
 		defer g.recordPanic()
+		reservedAt = s.now()
+		var cancel context.CancelFunc
+		prepCtx, cancel = context.WithDeadline(ctx, reservedAt.Add(s.preSendBudget))
+		defer cancel()
 	}
 
-	attachments, err := s.resolveAttachments(ctx, shared.StringSliceField(input, "attachments"))
+	attachments, err := s.resolveAttachments(prepCtx, shared.StringSliceField(input, "attachments"))
 	if err != nil {
 		return g.finish("", err)
 	}
 
-	handle, err := s.clientFor(ctx, provider, ctor, input)
+	handle, err := s.clientFor(prepCtx, provider, ctor, input)
 	if err != nil {
 		if !errors.Is(err, shared.ErrValidation) {
 			// The client could not be built: nothing was sent.
@@ -187,6 +205,16 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 		// Cancelled before the send started: nothing reached the provider.
 		return g.finish("", NotDelivered(provider, 0, err))
 	}
+	if intent != nil {
+		if elapsed := s.now().Sub(reservedAt); elapsed > s.preSendBudget {
+			// Too late to send under this reservation: the intent could turn
+			// stale while the send is still in flight, and an operator's
+			// resend of a stale intent would then duplicate the email.
+			// Nothing was sent: not delivered, and a retry re-reserves it.
+			return g.finish("", NotDelivered(provider, 0, shared.Transient("pre-send budget exceeded",
+				fmt.Errorf("%s passed between the reservation and the send, over the %s pre-send budget", elapsed.Round(time.Millisecond), s.preSendBudget))))
+		}
+	}
 	g.sendStarted = true
 	messageID, err := client.Send(ctx, msg)
 	if err != nil {
@@ -207,14 +235,14 @@ type guard struct {
 	// sendStarted: the provider client was called, so it may have handed the
 	// message over before panicking.
 	sendStarted bool
-	// finished: finish was called; a panic in it, or after it, is not
-	// recorded again.
+	// finished: finish attempted to record the outcome; a panic after that
+	// (in the store's Record, or later) is not recorded again. A panic in
+	// finish before it still is.
 	finished bool
 }
 
 func (g *guard) finish(messageID string, sendErr error) (map[string]any, error) {
-	g.finished = true
-	return g.s.finish(g.ctx, g.intent, messageID, sendErr)
+	return g.s.finishTracked(g.ctx, g.intent, messageID, sendErr, &g.finished)
 }
 
 // recordPanic is deferred by Execute once an intent is reserved: a panic
@@ -229,12 +257,45 @@ func (g *guard) recordPanic() {
 	if !g.finished {
 		g.finished = true
 		if g.sendStarted {
-			_, _ = g.s.finish(g.ctx, g.intent, "", Unknown(g.provider, 0, fmt.Errorf("provider client panicked: %v", r)))
+			_, _ = g.s.finish(g.ctx, g.intent, "", Unknown(g.provider, 0, fmt.Errorf("panicked once the send had started: %v", r)))
 		} else {
 			_, _ = g.s.finish(g.ctx, g.intent, "", NotDelivered(g.provider, 0, fmt.Errorf("panicked before the send: %v", r)))
 		}
 	}
 	panic(r)
+}
+
+// preSendBudget bounds the time between reserving an intent and calling the
+// provider. A reservation older than sendintent.StalePendingAfter may be
+// taken over by an operator's explicit resend while it is still pending, so
+// the send must start early enough to finish (shared.ProviderHTTPTimeout)
+// and be recorded (recordTimeout) before then, with a minute to spare:
+// 15 min − 2 min − 10 s − 1 min = 11 min 50 s. Resolving attachments and
+// building the client run under this deadline; a call that still gets past
+// it is not sent (not delivered, transient).
+const preSendBudget = sendintent.StalePendingAfter - shared.ProviderHTTPTimeout - recordTimeout - time.Minute
+
+// maxBodyBytes and maxSubjectBytes cap the body and subject, checked with the
+// other input before anything is reserved. 5 MiB of body is more than any
+// provider's inline request takes with room to spare (Microsoft Graph's
+// whole sendMail request is 4 MB; Gmail's message 25 MB after
+// quoted-printable encoding, which can triple non-ASCII text), and keeps a
+// runaway template from being held in memory per call. 998 bytes is RFC
+// 5322's line limit, a ceiling no real subject approaches.
+const (
+	maxBodyBytes    = 5 << 20
+	maxSubjectBytes = 998
+)
+
+// validateSize enforces maxBodyBytes and maxSubjectBytes.
+func validateSize(body, subject string) error {
+	if len(body) > maxBodyBytes {
+		return fmt.Errorf("%w: body must be at most %d bytes", shared.ErrValidation, maxBodyBytes)
+	}
+	if len(subject) > maxSubjectBytes {
+		return fmt.Errorf("%w: subject must be at most %d bytes", shared.ErrValidation, maxSubjectBytes)
+	}
+	return nil
 }
 
 // bodyContentTypes is the registry's contentType enum; empty is text/plain.
@@ -469,6 +530,13 @@ const recordTimeout = 10 * time.Second
 // intent never turns a successful send into an error: a false failure invites
 // a resend, which would duplicate the email.
 func (s *Connector) finish(ctx context.Context, intent *sendintent.Intent, messageID string, sendErr error) (map[string]any, error) {
+	return s.finishTracked(ctx, intent, messageID, sendErr, nil)
+}
+
+// finishTracked is finish; it sets *attempted (when not nil) just before the
+// outcome is handed to the store, so a panic before that point is still
+// recorded by the guard.
+func (s *Connector) finishTracked(ctx context.Context, intent *sendintent.Intent, messageID string, sendErr error, attempted *bool) (map[string]any, error) {
 	out := intentOutput(intent, map[string]any{"sent": sendErr == nil})
 	outcome := OutcomeOf(sendErr)
 	if outcome == "" {
@@ -487,18 +555,17 @@ func (s *Connector) finish(ctx context.Context, intent *sendintent.Intent, messa
 
 	if intent != nil && s.intents != nil {
 		status := sendintent.Status(outcome)
-		detail := ""
-		if sendErr != nil {
-			detail = sendErr.Error()
-		}
 		// Provider error text can hold anything (a response cut mid-rune,
 		// a NUL): PostgreSQL text refuses both, and a refused write would
 		// leave the intent pending.
-		detail = recordable(detail)
+		detail := recordable(errorDetail(sendErr))
 		// Detached from the call's cancellation (the outcome must be kept even
 		// if the caller gave up) but bounded: a stuck database must not hold
 		// the call after the provider already accepted the message.
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+		if attempted != nil {
+			*attempted = true
+		}
 		err := s.intents.Record(recordCtx, intent.ID, intent.Attempts, status, messageID, detail)
 		cancel()
 		if err != nil {
@@ -506,14 +573,39 @@ func (s *Connector) finish(ctx context.Context, intent *sendintent.Intent, messa
 			// The intent stays pending: a retry with this messageKey would be
 			// refused as a duplicate, so the failure must not invite one.
 			var sendError *SendError
-			if errors.As(sendErr, &sendError) {
+			switch {
+			case errors.As(sendErr, &sendError):
 				unrecorded := *sendError
 				unrecorded.IntentUnrecorded = true
 				sendErr = &unrecorded
+			case sendErr != nil:
+				// A failure that is no delivery outcome (invalid input found
+				// after the reservation, a missing tenant): nothing was sent,
+				// but the intent is still pending, so it gets the same
+				// unknown class as any other unrecorded outcome. The cause
+				// stays in Err (its ErrValidation class is hidden: a
+				// permanent class would tell the caller nothing more is to be
+				// done, while the pending intent needs resolving).
+				sendErr = &SendError{Outcome: OutcomeNotDelivered, Provider: "send-intent store", Err: sendErr, IntentUnrecorded: true}
 			}
 		}
 	}
 	return out, sendErr
+}
+
+// errorDetail is err's text for the intent's detail. Error() is the error
+// type's own code (an adapter's, a mock's): a panic in it must not stop the
+// outcome from being recorded, so it is recovered and a fallback is used.
+func errorDetail(err error) (detail string) {
+	if err == nil {
+		return ""
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			detail = fmt.Sprintf("error text unavailable (%T.Error panicked: %v)", err, r)
+		}
+	}()
+	return err.Error()
 }
 
 // maxRecordedBytes caps the text recorded on a send intent.

@@ -4,6 +4,9 @@
 # Local development environment (copy of .env-example; `make setup` creates
 # it). It sets the compose host ports (WC_*), the TEST_* variables and
 # pgcommon's PG_* settings; values here override the defaults below.
+# They also override variables exported in the shell (make gives a makefile
+# assignment precedence over the environment): override one with
+# `make <target> VAR=value` or `make -e`. CI has no .env.
 -include .env
 
 # Follows iam-org-membership's Makefile. This module is a library, so it has
@@ -63,26 +66,32 @@ GOLANGCI_LINT ?= $(GO) tool -modfile=tools/go.mod golangci-lint
 # Integration infrastructure: docker-compose.yml (postgres, pgbouncer, valkey,
 # floci, and the valkey-cluster profile). Host ports are overridable; the
 # TEST_* variables the tests read are derived from the same values, so a port
-# change needs no other edit. The cluster's ports are fixed (57001-57003: its
-# nodes announce the host port), see docker-compose.yml.
+# change needs no other edit. The Valkey Cluster's six nodes announce their
+# host port, so host and container ports are the same range
+# (WC_VALKEY_CLUSTER_PORTS, default 57001-57006), see docker-compose.yml.
 COMPOSE           ?= docker compose
-# Compose profiles docker-up / docker-down enable: the three-master Valkey
-# Cluster the slot-migration test (TEST_VALKEY_CLUSTER_ADDRS) runs against.
+# Compose profiles docker-up / docker-down enable: the Valkey Cluster (three
+# masters, one replica each) the cluster tests (TEST_VALKEY_CLUSTER_ADDRS) run
+# against.
 COMPOSE_PROFILE_FLAGS ?= --profile valkey-cluster
 WC_PG_PORT        ?= 55432
 WC_PGBOUNCER_PORT ?= 55433
 WC_VALKEY_PORT    ?= 56379
 WC_FLOCI_PORT     ?= 4580
+WC_VALKEY_CLUSTER_PORTS ?= 57001-57006
+# The cluster tests' seed nodes: the range's first three ports.
+VALKEY_CLUSTER_SEEDS := $(shell p=$(firstword $(subst -, ,$(WC_VALKEY_CLUSTER_PORTS))); \
+                          echo 127.0.0.1:$$p,127.0.0.1:$$((p + 1)),127.0.0.1:$$((p + 2)))
 # Registry for the compose images and the Valkey restart tests' containers
 # (pinned by digest); CI sets mirror.gcr.io.
 WC_REGISTRY       ?= docker.io
-export WC_PG_PORT WC_PGBOUNCER_PORT WC_VALKEY_PORT WC_FLOCI_PORT WC_REGISTRY
+export WC_PG_PORT WC_PGBOUNCER_PORT WC_VALKEY_PORT WC_FLOCI_PORT WC_VALKEY_CLUSTER_PORTS WC_REGISTRY
 
 INT_ENV := TEST_POSTGRES_DSN='postgres://postgres:test@localhost:$(WC_PG_PORT)/connectors?sslmode=disable' \
            TEST_PGBOUNCER_DSN='postgres://postgres:test@localhost:$(WC_PGBOUNCER_PORT)/connectors?sslmode=disable' \
            TEST_VALKEY_ADDR='localhost:$(WC_VALKEY_PORT)' \
            TEST_S3_ENDPOINT='http://localhost:$(WC_FLOCI_PORT)' \
-           TEST_VALKEY_CLUSTER_ADDRS='127.0.0.1:57001,127.0.0.1:57002,127.0.0.1:57003' \
+           TEST_VALKEY_CLUSTER_ADDRS='$(VALKEY_CLUSTER_SEEDS)' \
            TEST_VALKEY_DOCKER=1
 
 # -----------------------------

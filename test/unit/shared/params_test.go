@@ -29,6 +29,19 @@ func TestApplyQueryParams_KeepsAliasQueryVerbatim(t *testing.T) {
 	assert.Equal(t, "verbose", req.URL.RawQuery)
 }
 
+// An empty key would append "=z", a pair no service can mean: refused, and
+// the request is left as the alias built it.
+func TestApplyQueryParams_EmptyKeyIsValidation(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequest(http.MethodGet, "http://svc/items?a=1", nil)
+	require.NoError(t, err)
+	err = shared.ApplyQueryParams(req, map[string]any{"": "z", "b": "2"})
+	require.ErrorIs(t, err, shared.ErrValidation)
+	assert.Contains(t, err.Error(), "query param name must not be empty")
+	assert.Equal(t, "a=1", req.URL.RawQuery)
+}
+
 func TestApplyQueryParams_NonScalarIsValidation(t *testing.T) {
 	t.Parallel()
 

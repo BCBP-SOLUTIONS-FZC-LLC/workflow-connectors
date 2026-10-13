@@ -30,6 +30,9 @@ type fakeDriveFilesAPI struct {
 type fakeDriveFile struct {
 	id, folder, name, documentID, contentType string
 	content                                   []byte
+	// trashed is a file in the trash: like Drive, get, download and update
+	// still find it, list queries do not.
+	trashed bool
 }
 
 var errFakeDrive = &fakeError{"fake drive: injected failure"}
@@ -48,7 +51,7 @@ func (f *fakeDriveFilesAPI) listByName(_ context.Context, folderID, name string)
 	}
 	var out []*driveFile
 	for _, file := range f.files {
-		if file.folder == folderID && file.name == name {
+		if file.folder == folderID && file.name == name && !file.trashed {
 			out = append(out, &driveFile{ID: file.id, MimeType: file.contentType, DocumentID: file.documentID})
 		}
 	}
@@ -62,7 +65,7 @@ func (f *fakeDriveFilesAPI) findByDocumentID(_ context.Context, folderID, docume
 		return nil, f.err
 	}
 	for _, file := range f.files {
-		if file.folder == folderID && file.documentID == documentID {
+		if file.folder == folderID && file.documentID == documentID && !file.trashed {
 			return &driveFile{ID: file.id, MimeType: file.contentType, DocumentID: file.documentID}, nil
 		}
 	}
@@ -77,11 +80,26 @@ func (f *fakeDriveFilesAPI) listByDocumentID(_ context.Context, folderID, docume
 	}
 	var out []*driveFile
 	for _, file := range f.files {
-		if file.folder == folderID && file.documentID == documentID {
+		if file.folder == folderID && file.documentID == documentID && !file.trashed {
 			out = append(out, &driveFile{ID: file.id, MimeType: file.contentType, DocumentID: file.documentID})
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeDriveFilesAPI) get(_ context.Context, fileID string) (*driveFile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	for _, file := range f.files {
+		if file.id == fileID {
+			return &driveFile{ID: file.id, MimeType: file.contentType, DocumentID: file.documentID,
+				Trashed: file.trashed, Parents: []string{file.folder}}, nil
+		}
+	}
+	return nil, errDriveNotFound
 }
 
 func (f *fakeDriveFilesAPI) download(_ context.Context, fileID string, _ int64) ([]byte, string, error) {
@@ -222,6 +240,40 @@ func (f *fakeDriveFilesAPI) placeTyped(folder, name, mimeType string) string {
 	file := &fakeDriveFile{id: uuid.NewString(), folder: folder, name: name, contentType: mimeType, content: []byte("drive item")}
 	f.files = append(f.files, file)
 	return file.id
+}
+
+// trash moves the file with id to the trash, as a user would in Drive.
+func (f *fakeDriveFilesAPI) trash(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, file := range f.files {
+		if file.id == id {
+			file.trashed = true
+		}
+	}
+}
+
+// move moves the file with id to another folder, as a user would in Drive.
+func (f *fakeDriveFilesAPI) move(id, folder string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, file := range f.files {
+		if file.id == id {
+			file.folder = folder
+		}
+	}
+}
+
+// contentOf returns the content of the file with id, and whether it exists.
+func (f *fakeDriveFilesAPI) contentOf(id string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, file := range f.files {
+		if file.id == id {
+			return string(file.content), true
+		}
+	}
+	return "", false
 }
 
 // mimeOf returns the MIME type of the file with id, "" when it is gone.

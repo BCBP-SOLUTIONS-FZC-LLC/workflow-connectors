@@ -133,6 +133,12 @@ func joinInternalURL(baseURL, path string) (string, error) {
 	if !strings.HasPrefix(path, "/") || u.Scheme != base.Scheme || u.Host != base.Host || u.User != nil {
 		return "", fmt.Errorf("%w: request URL must stay on the alias's scheme and host, with no userinfo", ErrValidation)
 	}
+	// A fragment is never sent: everything after "#" (a fixed query
+	// included) would silently vanish. Rendered parameters are escaped, so
+	// a "#" can only come from an unvalidated alias path.
+	if strings.Contains(path, "#") {
+		return "", fmt.Errorf("%w: request URL must not contain a fragment (\"#\")", ErrValidation)
+	}
 	return full, nil
 }
 
@@ -142,7 +148,8 @@ func joinInternalURL(baseURL, path string) (string, error) {
 // (order, valueless flags such as "?verbose" and its escaping): the caller's
 // parameters, sorted by key and query-escaped, are appended after it. A
 // value that is not a scalar (see FormatScalarParam) is ErrValidation, as is
-// an alias query url.ParseQuery rejects (a ";" in it, an invalid escape).
+// an alias query url.ParseQuery rejects (a ";" in it, an invalid escape) and
+// an empty key.
 func ApplyQueryParams(req *http.Request, params map[string]any) error {
 	if len(params) == 0 {
 		return nil
@@ -156,6 +163,9 @@ func ApplyQueryParams(req *http.Request, params map[string]any) error {
 	}
 	keys := make([]string, 0, len(params))
 	for k := range params {
+		if k == "" {
+			return fmt.Errorf("%w: query param name must not be empty", ErrValidation)
+		}
 		if fixed.Has(k) {
 			return fmt.Errorf("%w: query param %q is fixed by the alias's path template", ErrValidation, k)
 		}

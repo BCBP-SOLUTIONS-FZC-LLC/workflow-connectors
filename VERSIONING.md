@@ -4,9 +4,19 @@ Go module, versioned via Git tags per [SemVer 2.0.0](https://semver.org/). `pkg/
 
 | Bump | When you change |
 |------|-----------------|
-| **MAJOR** | Any breaking change to an exported identifier (`Connector`, `Config`, constructors such as `storage.New`/`sendemail.New`, the `ProviderClient` interfaces, `Definition`/`Field`, any `Type*`/`FieldKind*` constant) or to documented behaviour. A new major version also changes the module path: v2.x lives at `…/workflow-connectors/v2`, v3.x would live at `…/v3` |
+| **MAJOR** | Any breaking change to an exported identifier (`Connector`, `Config`, constructors such as `storage.New`/`sendemail.New`, the `ProviderClient` interfaces, `Definition`/`Field`, any `Type*`/`FieldKind*` constant) or to documented behaviour a correct caller relies on (see [What is not a breaking change](#what-is-not-a-breaking-change)). A new major version also changes the module path: v2.x lives at `…/workflow-connectors/v2`, v3.x would live at `…/v3` |
 | **MINOR** | New connector type, new optional field, new backward-compatible capability |
 | **PATCH** | Bug fix, documentation-only change |
+
+## What is not a breaking change
+
+"Documented behaviour" means the contract the docs promise to a correct caller, not every input the code happened to accept. These changes are **MINOR** (or **PATCH** when they are pure fixes with nothing new exported), provided each is listed in `CHANGELOG.md` under `### Changed` (or `### Removed`) with an **Upgrade:** note when a consumer has to act:
+
+- **Refusing input that could never succeed** or that contradicted a documented contract, with `ErrValidation` (for example a `contentType` outside the registry enum, a storage `key` that is not valid UTF-8, an alias YAML key `Config` does not define, an alias `pathTemplate` whose query or fragment could not be sent as written).
+- **Fixing behaviour that contradicted the docs**, even when a caller could observe the old behaviour (for example a storage delete that reported success on a missing bucket, a `paramCount: 0` that did not mean "no parameters", an error class that made `DecideRetry` give the wrong answer).
+- **Removing a `registry.All()` entry for a connector with no working provider** (every authored step could only fail), as long as `registry.Lookup` and `connectors.New` keep the type so existing tasks fail the same way at run time.
+
+Still **MAJOR**, whatever the motive: a changed or removed exported identifier or signature, a changed meaning of an exported identifier a correct caller relies on (a sentinel, an error class, a `RetryPolicy`, a field name or kind), a removed connector type or input/output field, and a refused input that a documented contract allowed. The **apidiff gate** (`make api-compat API_NEW_VERSION=vX.Y.Z`, blocking in `release.yml`) enforces the exported-API half for MINOR and PATCH releases; the behavioural half is the reviewer's call, against this list.
 
 ## Current release status
 

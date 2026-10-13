@@ -80,13 +80,30 @@ func TestStorage_UploadProviderError_IsUpstream(t *testing.T) {
 	assert.ErrorIs(t, err, boom)
 }
 
-func TestStorage_UploadCreateDocument_WithoutRefService_IsValidation(t *testing.T) {
+// An upload whose ref cannot be created (no ref service, no tenant) fails
+// before anything is written: never an object in the bucket and then a
+// permanent failure.
+func TestStorage_UploadCreateDocument_WithoutRefServiceOrTenant_UploadsNothing(t *testing.T) {
 	t.Parallel()
 
-	client := storage.NewMockStorageClient()
-	_, err := storage.New(mockStorageProviders(client), nil).Execute(tctx, with(base("upload"), "content", "hi", "createDocument", true))
-	require.Error(t, err)
-	assert.ErrorIs(t, err, shared.ErrValidation)
+	for name, tc := range map[string]struct {
+		ctx  context.Context
+		refs *docref.Service
+		want error
+	}{
+		"no ref service": {ctx: tctx, refs: nil, want: shared.ErrValidation},
+		"no tenant":      {ctx: context.Background(), refs: docref.NewMemoryService(), want: shared.ErrMissingTenant},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			client := storage.NewMockStorageClient()
+			_, err := storage.New(mockStorageProviders(client), tc.refs).Execute(tc.ctx, with(base("upload"), "content", "hi", "createDocument", true))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tc.want)
+			_, _, fetchErr := client.Fetch(context.Background(), "b", "k", 10)
+			assert.Error(t, fetchErr, "nothing uploaded")
+		})
+	}
 }
 
 func TestStorage_UploadCreateDocument_RefStoreFailure_IsUpstream(t *testing.T) {

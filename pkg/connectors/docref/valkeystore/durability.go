@@ -135,16 +135,18 @@ func checkReplica(ctx context.Context, node *redis.Client) error {
 }
 
 // readSettings reads the settings evaluate judges. Only a server reply
-// refusing CONFIG GET (unknown or renamed command, NOPERM) is
-// ErrConfigUnavailable; any other failure — the node unreachable, a
-// timeout, the pool exhausted, the context ended — is returned as is, so an
-// unreachable node is never mistaken for one whose settings must merely be
-// checked in the console.
+// refusing CONFIG GET itself — NOPERM (the user lacks +config|get), or an
+// unknown command or subcommand (CONFIG disabled or renamed) — is
+// ErrConfigUnavailable. Any other failure is returned as is: another server
+// reply (WRONGPASS: the node lacks the worker's ACL user; LOADING, BUSY, a
+// server at maxclients), the node unreachable, a timeout, the pool
+// exhausted, the context ended. So a node that could not be checked is never
+// mistaken for one whose settings must merely be checked in the console.
 func readSettings(ctx context.Context, node *redis.Client) (map[string]string, error) {
 	settings := map[string]string{}
 	for _, name := range []string{"appendonly", "appendfsync", "maxmemory-policy"} {
 		values, err := node.ConfigGet(ctx, name).Result()
-		if _, refused := errors.AsType[redis.Error](err); refused {
+		if configRefused(err) {
 			return nil, fmt.Errorf("%w: %w", ErrConfigUnavailable, err)
 		}
 		if err != nil {
@@ -153,6 +155,14 @@ func readSettings(ctx context.Context, node *redis.Client) (map[string]string, e
 		settings[name] = values[name]
 	}
 	return settings, nil
+}
+
+// configRefused reports a server reply refusing CONFIG GET as such: NOPERM,
+// or "ERR unknown command" / "ERR unknown subcommand" (HasErrorPrefix strips
+// the leading "ERR ").
+func configRefused(err error) bool {
+	return redis.IsPermissionError(err) ||
+		redis.HasErrorPrefix(err, "unknown command") || redis.HasErrorPrefix(err, "unknown subcommand")
 }
 
 // evaluate is CheckDurability's rule set, separated for testing.

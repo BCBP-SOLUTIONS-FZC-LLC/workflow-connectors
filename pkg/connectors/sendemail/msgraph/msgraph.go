@@ -49,18 +49,29 @@ func NewProvider(_ context.Context, params map[string]any) (sendemail.ProviderCl
 		TokenURL:     fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID),
 		Scopes:       []string{"https://graph.microsoft.com/.default"},
 	}
-	// Token requests use a bounded client of their own. sendMail goes through
-	// a provider client that never follows a redirect: the OAuth transport
-	// would otherwise re-send the request and its bearer token to whichever
-	// host a redirect names.
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Timeout: shared.DefaultHTTPTimeout})
+	// Token requests use a client of their own (tokenHTTPClient: bounded, no
+	// redirects — a redirect would carry the client secret's request to
+	// another host). sendMail goes through a provider client that never
+	// follows a redirect either: the OAuth transport would otherwise re-send
+	// the request and its bearer token to whichever host a redirect names.
+	tokenClient := tokenHTTPClient()
+	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenClient)
 	base := shared.ProviderHTTPClient()
 	httpClient := &http.Client{
 		Transport:     &oauth2.Transport{Source: cc.TokenSource(tokenCtx), Base: base.Transport},
 		Timeout:       base.Timeout,
 		CheckRedirect: base.CheckRedirect,
 	}
-	return &graphClient{api: &realGraphAPI{httpClient: httpClient, baseURL: graphAPIBaseURL, idle: base}}, nil
+	return &graphClient{api: &realGraphAPI{httpClient: httpClient, baseURL: graphAPIBaseURL, idle: base, tokenIdle: tokenClient}}, nil
+}
+
+// tokenHTTPClient is the client of the OAuth token requests: like
+// shared.ProviderHTTPClient (its own transport, HTTP/1.1, no redirects),
+// bounded by shared.DefaultHTTPTimeout.
+func tokenHTTPClient() *http.Client {
+	c := shared.ProviderHTTPClient()
+	c.Timeout = shared.DefaultHTTPTimeout
+	return c
 }
 
 var tenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
@@ -195,11 +206,14 @@ type realGraphAPI struct {
 	httpClient *http.Client
 	baseURL    string
 	idle       *http.Client // owns the transport whose idle connections Close drops
+	tokenIdle  *http.Client // the token requests' client, likewise
 }
 
 func (r *realGraphAPI) Close() error {
-	if r.idle != nil {
-		r.idle.CloseIdleConnections()
+	for _, client := range []*http.Client{r.idle, r.tokenIdle} {
+		if client != nil {
+			client.CloseIdleConnections()
+		}
 	}
 	return nil
 }

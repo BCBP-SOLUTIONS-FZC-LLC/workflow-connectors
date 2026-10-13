@@ -115,8 +115,12 @@ var ErrPruneArgs = errors.New("sendintent: prune needs a positive age and batch"
 var ErrNoToken = errors.New("sendintent: release needs a reservation token")
 
 // ErrNotReserved marks a Reserve error after which the store knows that
-// nothing was reserved: the statement failed before its transaction could
-// commit (sqlstore wraps such errors; the error keeps its retry class). A
+// nothing was reserved: the call failed before its transaction could
+// commit — no connection could be acquired (pool exhausted or closed, the
+// context expired), BEGIN or the transaction's setup failed, or the
+// statement itself failed (sqlstore wraps such errors; the error keeps its
+// retry class). Only a failure after the statement succeeded (COMMIT failed
+// or its reply was lost) is left unmarked. A
 // Reserve error that does not match it is ambiguous — the reservation may
 // have committed and only its reply been lost — and send-email recovers it
 // by its token (Get, then Releaser).

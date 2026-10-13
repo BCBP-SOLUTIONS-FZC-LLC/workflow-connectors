@@ -38,6 +38,8 @@ type fakeDriveServer struct {
 	listStatus int                       // non-zero: GET /files fails with this status
 	listPages  map[string]map[string]any // pageToken ("" for the first) -> response body
 	media      map[string]string         // fileID -> content served by alt=media
+	meta       map[string]map[string]any // fileID -> metadata served by files.get
+	lastFields string                    // the fields parameter of the last files.get
 	status     map[string]int            // "METHOD fileID" -> forced status
 	created    map[string]map[string]any // fileID -> metadata seen on create
 	updated    map[string]map[string]any // fileID -> metadata seen on update
@@ -51,6 +53,7 @@ func newFakeDriveServer(t *testing.T) (*fakeDriveServer, *realDriveFilesAPI) {
 		t:         t,
 		listPages: map[string]map[string]any{},
 		media:     map[string]string{},
+		meta:      map[string]map[string]any{},
 		status:    map[string]int{},
 		created:   map[string]map[string]any{},
 		updated:   map[string]map[string]any{},
@@ -103,6 +106,16 @@ func (s *fakeDriveServer) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/pdf")
 		_, _ = io.WriteString(w, content)
+
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/files/"):
+		s.lastFields = r.URL.Query().Get("fields")
+		meta, ok := s.meta[id]
+		if !ok {
+			writeAPIError(w, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(meta)
 
 	case r.Method == http.MethodPost && path == "/files":
 		meta, content := s.readMultipart(r)

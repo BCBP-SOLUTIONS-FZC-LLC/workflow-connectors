@@ -68,7 +68,7 @@ func (s *Store) Reserve(ctx context.Context, tenantID, messageKey string, resend
 		   OR ($3 > 0 AND connector_send_intents.attempts = $3
 		       AND (connector_send_intents.status <> 'pending'
 		            OR connector_send_intents.updated_at <= now() - make_interval(secs => $5)))`
-	in, inStatement, err := s.query(ctx, `
+	in, maybeCommitted, err := s.query(ctx, `
 		INSERT INTO connector_send_intents (tenant_id, message_key, status, reservation_token)
 		VALUES ($1, $2, 'pending', $4)
 		ON CONFLICT ON CONSTRAINT uq_connector_send_intents_key `+conflict+`
@@ -77,10 +77,12 @@ func (s *Store) Reserve(ctx context.Context, tenantID, messageKey string, resend
 		return in, true, nil
 	}
 	if !errors.Is(err, pgcommon.ErrNoRows) {
-		if inStatement {
-			// The statement itself failed, so COMMIT was never sent: nothing
-			// was reserved. A failure outside it (COMMIT's reply lost) is
-			// ambiguous and left unmarked.
+		if !maybeCommitted {
+			// The failure came before COMMIT was sent (acquiring a
+			// connection, BEGIN, the transaction's timeout or GUC setup, the
+			// statement itself): nothing was reserved. Only a failure after
+			// the statement succeeded — COMMIT failed or its reply was lost —
+			// is ambiguous, and left unmarked.
 			return sendintent.Intent{}, false, fmt.Errorf("sendintent: reserve: %w: %w", sendintent.ErrNotReserved, classify(err))
 		}
 		return sendintent.Intent{}, false, fmt.Errorf("sendintent: reserve: %w", classify(err))
@@ -211,21 +213,26 @@ func (s *Store) queryOne(ctx context.Context, stmt string, args ...any) (sendint
 }
 
 // query runs stmt, which returns one intent, in its own transaction.
-// inStatement reports that the error came from the statement: its
-// transaction was rolled back, never committed. Any other error (acquiring
-// a connection, BEGIN, COMMIT) leaves it open whether a write committed.
-func (s *Store) query(ctx context.Context, stmt string, args ...any) (in sendintent.Intent, inStatement bool, err error) {
+// maybeCommitted reports, with an error, that the statement succeeded and
+// RunInTx still failed: only COMMIT (or the check pgcommon makes just before
+// it) can fail then, so whether the write committed is unknown. Any error
+// before that point — acquiring a connection (pool exhausted, closed,
+// context expired), BEGIN, the transaction's timeouts or GUCs, the statement
+// itself — left the transaction uncommitted (pgcommon.RunInTx sends COMMIT
+// only after the callback returned nil).
+func (s *Store) query(ctx context.Context, stmt string, args ...any) (in sendintent.Intent, maybeCommitted bool, err error) {
+	callbackDone := false
 	err = pgcommon.RunInTx(ctx, s.pool, pgcommon.TxOptions{}, func(ctx context.Context, tx pgcommon.Tx) error {
 		var status string
 		if err := tx.QueryRow(ctx, stmt, args...).Scan(&in.ID, &in.TenantID, &in.MessageKey, &status, &in.Attempts,
 			&in.ReservationToken, &in.ProviderMessageID, &in.Detail, &in.CreatedAt, &in.UpdatedAt); err != nil {
-			inStatement = true
 			return err
 		}
 		in.Status = sendintent.Status(status)
+		callbackDone = true
 		return nil
 	})
-	return in, inStatement, err
+	return in, err != nil && callbackDone, err
 }
 
 // classify attaches a retry class to a database error, as the document

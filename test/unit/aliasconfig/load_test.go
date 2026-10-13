@@ -162,9 +162,10 @@ func TestLoad_SingleDocumentOnly(t *testing.T) {
 	assert.Contains(t, err.Error(), "single YAML document")
 }
 
-// A trailing "---" (an empty document, optionally with comments) is common in
-// generated or concatenated YAML; it must not stop the worker from starting.
-func TestLoad_TrailingEmptyDocumentsAreIgnored(t *testing.T) {
+// A leading or trailing "---" (an empty document, optionally with comments,
+// or an explicit null) is common in generated or concatenated YAML; it must
+// not stop the worker from starting.
+func TestLoad_EmptyDocumentsAreIgnored(t *testing.T) {
 	t.Parallel()
 
 	for name, content := range map[string]string{
@@ -172,6 +173,12 @@ func TestLoad_TrailingEmptyDocumentsAreIgnored(t *testing.T) {
 		"trailing --- no newline":   "version: 1\n---",
 		"trailing --- with comment": "version: 1\n--- # end\n# nothing more\n",
 		"several empty documents":   "version: 1\n---\n---\n...\n",
+		"trailing explicit ~":       "version: 1\n--- ~\n",
+		"trailing explicit null":    "version: 1\n--- null\n",
+		"trailing null document":    "version: 1\n---\nnull\n",
+		"leading empty document":    "---\n---\nversion: 1\n",
+		"leading null document":     "--- ~\n---\nversion: 1\n",
+		"empty documents around":    "---\n# header\n---\nversion: 1\n---\nNULL\n...\n",
 	} {
 		cfg, err := aliasconfig.Load(writeTemp(t, content))
 		require.NoError(t, err, name)
@@ -183,11 +190,11 @@ func TestLoad_SecondDocumentWithContentIsRejected(t *testing.T) {
 	t.Parallel()
 
 	for name, content := range map[string]string{
-		"mapping":            "version: 1\n---\nrestCall: []\n",
-		"explicit null":      "version: 1\n---\nnull\n",
-		"scalar":             "version: 1\n---\nhello\n",
-		"after empty doc":    "version: 1\n---\n---\nversion: 2\n",
-		"malformed document": "version: 1\n---\n[unclosed\n",
+		"mapping":         "version: 1\n---\nrestCall: []\n",
+		"scalar":          "version: 1\n---\nhello\n",
+		"string null":     "version: 1\n---\n'null'\n",
+		"after empty doc": "version: 1\n---\n---\nversion: 2\n",
+		"leading content": "hello\n---\nversion: 1\n",
 	} {
 		_, err := aliasconfig.Load(writeTemp(t, content))
 		require.Error(t, err, name)
@@ -195,10 +202,30 @@ func TestLoad_SecondDocumentWithContentIsRejected(t *testing.T) {
 	}
 }
 
+// A malformed document fails the load wherever it is, with the parser's
+// error, even after a valid one.
+func TestLoad_MalformedLaterDocumentIsRejected(t *testing.T) {
+	t.Parallel()
+
+	_, err := aliasconfig.Load(writeTemp(t, "version: 1\n---\n[unclosed\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "aliasconfig: parsing")
+}
+
+// An unknown key is still rejected when the content document comes after
+// empty ones (it is decoded strictly).
+func TestLoad_UnknownKeyAfterEmptyDocumentIsRejected(t *testing.T) {
+	t.Parallel()
+
+	_, err := aliasconfig.Load(writeTemp(t, "---\n---\nversoin: 1\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "versoin")
+}
+
 func TestLoad_EmptyFileIsEmptyConfig(t *testing.T) {
 	t.Parallel()
 
-	for _, content := range []string{"", "# only a comment\n"} {
+	for _, content := range []string{"", "# only a comment\n", "---\n", "--- ~\n---\n", "null\n"} {
 		cfg, err := aliasconfig.Load(writeTemp(t, content))
 		require.NoError(t, err)
 		assert.Equal(t, aliasconfig.Config{}, cfg)

@@ -81,6 +81,8 @@ func TestNewInternalRequest_StaysOnTheAliasHost(t *testing.T) {
 		{"http://svc", "/%zz"},              // unparsable result
 		{"http://[::1", "/x"},               // unparsable base
 		{"http://svc", ""},                  // nothing to append
+		{"http://svc", "/x#?role=user"},     // fragment: the fixed query would vanish
+		{"http://svc", "/x#"},               // empty fragment
 	} {
 		_, err := shared.NewInternalRequest(ctx, http.MethodGet, tc.base, tc.path, nil)
 		require.ErrorIs(t, err, shared.ErrValidation, "%s + %s", tc.base, tc.path)

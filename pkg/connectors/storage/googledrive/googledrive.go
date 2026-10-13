@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -63,6 +64,10 @@ type driveFile struct {
 	ID         string
 	MimeType   string
 	DocumentID string // appProperties[connectorDocumentId], empty for files made elsewhere
+	// Trashed and Parents are read by get only (list queries already keep
+	// to untrashed files in the folder).
+	Trashed bool
+	Parents []string
 }
 
 type driveFilesAPI interface {
@@ -71,6 +76,8 @@ type driveFilesAPI interface {
 	findByDocumentID(ctx context.Context, folderID, documentID string) (*driveFile, error)
 	// listByDocumentID returns every file tagged with documentID, oldest first.
 	listByDocumentID(ctx context.Context, folderID, documentID string) ([]*driveFile, error)
+	// get returns a file's metadata, with Trashed and Parents.
+	get(ctx context.Context, fileID string) (*driveFile, error)
 	download(ctx context.Context, fileID string, maxBytes int64) (content []byte, contentType string, err error)
 	create(ctx context.Context, folderID, name, contentType, documentID string, content []byte) (*driveFile, error)
 	// update replaces the file's content and tags it with documentID.
@@ -238,14 +245,18 @@ func (c *driveStorageClient) release(ctx context.Context, docID, attempt, reason
 // then on and a later delete removes it.
 func (c *driveStorageClient) write(ctx context.Context, doc documents.Document, folderID, name, contentType string, content []byte) (string, error) {
 	if doc.ObjectID != "" {
-		err := c.api.update(ctx, doc.ObjectID, contentType, doc.ID, content)
+		err := c.checkRecorded(ctx, folderID, doc.ObjectID)
+		if err == nil {
+			err = c.api.update(ctx, doc.ObjectID, contentType, doc.ID, content)
+		}
 		if err == nil {
 			return doc.ObjectID, nil
 		}
 		if !errors.Is(err, errDriveNotFound) {
 			return "", err
 		}
-		// The recorded file was deleted outside the connector.
+		// The recorded file was deleted, trashed or moved out of the folder
+		// outside the connector: it is no longer the document's file.
 	}
 
 	fileID, err := c.existingFile(ctx, folderID, name, doc.ID)
@@ -273,6 +284,33 @@ func (c *driveStorageClient) write(ctx context.Context, doc documents.Document, 
 	// leftover. Remove them (best effort: delete removes them too).
 	c.removeOtherTaggedFiles(ctx, folderID, doc.ID, created.ID)
 	return created.ID, nil
+}
+
+// checkRecorded confirms that a document's recorded file is still its file:
+// it exists, is not in the trash, and is still in the folder. Drive's get,
+// update and download all succeed on a trashed file and on one moved to
+// another folder, so without this check an upload would overwrite (and a
+// fetch read, and a delete permanently remove) a file the folder no longer
+// holds. A file that fails the check is errDriveNotFound, so callers fall
+// back as for a deleted file. It costs one files.get per recorded-file
+// upload, fetch and delete.
+//
+// The folder is compared by ID: a folder given by an alias ("root") never
+// matches a parent, so its recorded file is always looked up again by its
+// document tag (which the folder query does resolve) — correct, at the cost
+// of a list call.
+func (c *driveStorageClient) checkRecorded(ctx context.Context, folderID, fileID string) error {
+	f, err := c.api.get(ctx, fileID)
+	if err != nil {
+		return err
+	}
+	if f.Trashed {
+		return fmt.Errorf("%w: file %q is in the trash", errDriveNotFound, fileID)
+	}
+	if !slices.Contains(f.Parents, folderID) {
+		return fmt.Errorf("%w: file %q is no longer in folder %q", errDriveNotFound, fileID, folderID)
+	}
+	return nil
 }
 
 // existingFile returns the file a document with no recorded file takes over:
@@ -338,7 +376,8 @@ func (c *driveStorageClient) removeOtherTaggedFiles(ctx context.Context, folderI
 // Fetch reads the document's recorded file. A document with no recorded
 // file — no row, a FAILED upload that never wrote, or an upload or delete
 // whose lease expired (its call crashed) — or whose recorded file was
-// deleted outside the connector is read from the file a retry of that upload
+// deleted, trashed or moved out of the folder outside the connector
+// (checkRecorded) is read from the file a retry of that upload
 // would adopt: the oldest file tagged with the document's ID,
 // else the oldest untagged content file of that name, placed in the folder
 // outside the connector. A document a live call is writing for the first
@@ -364,15 +403,21 @@ func (c *driveStorageClient) Fetch(ctx context.Context, folderID, name string, m
 		return nil, "", &documents.InProgressError{DocumentID: doc.ID, State: doc.State}
 	}
 	if found && doc.ObjectID != "" {
-		content, contentType, err := c.api.download(ctx, doc.ObjectID, maxBytes)
+		var content []byte
+		var contentType string
+		err := c.checkRecorded(ctx, folderID, doc.ObjectID)
+		if err == nil {
+			content, contentType, err = c.api.download(ctx, doc.ObjectID, maxBytes)
+		}
 		if !errors.Is(err, errDriveNotFound) {
 			if err != nil {
 				return nil, "", upstream(fmt.Sprintf("drive fetch %q", name), err)
 			}
 			return content, contentType, nil
 		}
-		// The recorded file was deleted outside the connector: read what a
-		// re-upload would write to (write's same fallback).
+		// The recorded file was deleted, trashed or moved outside the
+		// connector: read what a re-upload would write to (write's same
+		// fallback).
 	}
 
 	f, err := c.unrecordedFile(ctx, doc, found, folderID, name)
@@ -454,22 +499,31 @@ func (c *driveStorageClient) Delete(ctx context.Context, folderID, name string) 
 // left behind. A document that holds neither — no row before this delete, or
 // one whose upload never wrote — holds what an upload would adopt and a fetch
 // would read: the oldest untagged file of the same name, which is deleted
-// instead. A file already gone counts as deleted.
+// instead. A file already gone counts as deleted. A recorded file that was
+// trashed or moved out of the folder (checkRecorded) is no longer the
+// document's and is left as it is: a delete never reaches outside the folder,
+// and never purges the trash. A document with a recorded file never deletes
+// an untagged file by name, even when the recorded file is gone.
 func (c *driveStorageClient) deleteFiles(ctx context.Context, doc documents.Document, folderID, name string) error {
 	var ids []string
 	if doc.ObjectID != "" {
-		ids = append(ids, doc.ObjectID)
+		switch err := c.checkRecorded(ctx, folderID, doc.ObjectID); {
+		case err == nil:
+			ids = append(ids, doc.ObjectID)
+		case !errors.Is(err, errDriveNotFound):
+			return err
+		}
 	}
 	tagged, err := c.api.listByDocumentID(ctx, folderID, doc.ID)
 	if err != nil {
 		return err
 	}
 	for _, f := range tagged {
-		if f.ID != doc.ObjectID {
+		if !slices.Contains(ids, f.ID) {
 			ids = append(ids, f.ID)
 		}
 	}
-	if len(ids) == 0 {
+	if len(ids) == 0 && doc.ObjectID == "" {
 		f, err := c.untaggedByName(ctx, folderID, name)
 		if err != nil {
 			return err
@@ -541,6 +595,17 @@ func (r *realDriveFilesAPI) findOne(ctx context.Context, query string) (*driveFi
 	}
 	f := list.Files[0]
 	return &driveFile{ID: f.Id, MimeType: f.MimeType, DocumentID: f.AppProperties[appPropertyDocumentID]}, nil
+}
+
+// driveGetFields are the metadata get reads: enough for checkRecorded.
+const driveGetFields = "id, mimeType, trashed, parents, appProperties"
+
+func (r *realDriveFilesAPI) get(ctx context.Context, fileID string) (*driveFile, error) {
+	f, err := r.files.Get(fileID).Fields(driveGetFields).SupportsAllDrives(true).Context(ctx).Do()
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	return &driveFile{ID: f.Id, MimeType: f.MimeType, DocumentID: f.AppProperties[appPropertyDocumentID], Trashed: f.Trashed, Parents: f.Parents}, nil
 }
 
 func (r *realDriveFilesAPI) download(ctx context.Context, fileID string, maxBytes int64) ([]byte, string, error) {

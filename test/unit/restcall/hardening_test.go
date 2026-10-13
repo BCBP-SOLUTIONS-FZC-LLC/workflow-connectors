@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -207,4 +208,27 @@ func TestRestCall_AliasTimeoutLongerThanDefault_IsHonoured(t *testing.T) {
 	assert.Zero(t, client.Timeout, "no client-wide cap")
 	assert.Equal(t, 2*time.Minute, shared.CallTimeout(2*time.Minute))
 	assert.Equal(t, shared.DefaultHTTPTimeout, shared.CallTimeout(0), "an alias without a timeout gets the default deadline")
+}
+
+// Defence in depth for a Config that skipped Validate (restcall.New takes it
+// as is): a "#" in the alias path is refused at call time, before any
+// request, so a fixed query hidden behind it cannot be bypassed.
+func TestRestCall_UnvalidatedFragmentAlias_IsRefused(t *testing.T) {
+	t.Parallel()
+
+	var called atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	conn := restcall.New(aliasFor(srv.URL, "/users#?role=user"), nil, "t")
+	_, err := conn.Execute(deptCtx(), map[string]any{
+		"endpointAlias": "a",
+		"queryParams":   map[string]any{"role": "admin"},
+	})
+	require.ErrorIs(t, err, shared.ErrValidation)
+	assert.Contains(t, err.Error(), "fragment")
+	assert.False(t, called.Load())
 }

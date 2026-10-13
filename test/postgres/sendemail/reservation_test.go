@@ -149,3 +149,55 @@ func TestResend_RedeliveredResendJob_SendsOnce(t *testing.T) {
 	assert.Equal(t, 2, out["attempts"])
 	assert.Len(t, client.Sent(), 1)
 }
+
+// A Reserve that never reached PostgreSQL reserved nothing: an exhausted
+// pool (acquire timed out) is a transient not-delivered failure the worker
+// retries, and a closed pool is not delivered either — neither needs an
+// operator to verify a reservation that cannot exist.
+func TestReserve_NoConnection_IsNotDelivered(t *testing.T) {
+	t.Parallel()
+	postgresStore(t) // schema applied, or skipped
+	ctx := context.Background()
+
+	t.Run("pool exhausted", func(t *testing.T) {
+		t.Parallel()
+		pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: os.Getenv("TEST_POSTGRES_DSN"), MaxConns: 1, PoolName: "sendemail_exhausted_test"})
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+		held, stop, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		go func() {
+			done <- pool.WithConn(ctx, func(context.Context, *pgcommon.Conn) error { close(held); <-stop; return nil })
+		}()
+		<-held
+		defer func() { close(stop); require.NoError(t, <-done) }()
+
+		tenant := "tenant-" + uuid.NewString()
+		client := sendemail.NewMockSendEmailClient()
+		callCtx, cancel := context.WithTimeout(shared.WithTenant(ctx, tenant), 300*time.Millisecond)
+		defer cancel()
+		out, err := connector(sqlstore.New(pool), client).Execute(callCtx, emailInput("invoice-1"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, shared.ErrNotDelivered)
+		assert.True(t, shared.IsTransient(err), "nothing was reserved or sent: retry it (%v)", err)
+		var sendErr *sendemail.SendError
+		require.ErrorAs(t, err, &sendErr)
+		assert.False(t, sendErr.IntentUnrecorded)
+		assert.Equal(t, "not_delivered", out["deliveryOutcome"])
+		assert.Empty(t, client.Sent())
+	})
+
+	t.Run("pool closed", func(t *testing.T) {
+		t.Parallel()
+		pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: os.Getenv("TEST_POSTGRES_DSN"), MaxConns: 1, PoolName: "sendemail_closed_test"})
+		require.NoError(t, err)
+		pool.Close()
+		client := sendemail.NewMockSendEmailClient()
+		_, err = connector(sqlstore.New(pool), client).Execute(shared.WithTenant(ctx, "tenant-"+uuid.NewString()), emailInput("invoice-1"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, shared.ErrNotDelivered)
+		var sendErr *sendemail.SendError
+		require.ErrorAs(t, err, &sendErr)
+		assert.False(t, sendErr.IntentUnrecorded, "a closed pool reserved nothing")
+		assert.Empty(t, client.Sent())
+	})
+}

@@ -2,7 +2,6 @@ package gmail
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"testing"
 
@@ -14,12 +13,12 @@ import (
 )
 
 type fakeGmailMessagesAPI struct {
-	lastRaw   string
+	lastRaw   []byte
 	messageID string
 	err       error
 }
 
-func (f *fakeGmailMessagesAPI) send(_ context.Context, raw string) (string, error) {
+func (f *fakeGmailMessagesAPI) send(_ context.Context, raw []byte) (string, error) {
 	f.lastRaw = raw
 	if f.err != nil {
 		return "", f.err
@@ -27,7 +26,7 @@ func (f *fakeGmailMessagesAPI) send(_ context.Context, raw string) (string, erro
 	return f.messageID, nil
 }
 
-func TestGmailClient_Send_EncodesRawMessage(t *testing.T) {
+func TestGmailClient_Send_PassesTheMIMEMessage(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeGmailMessagesAPI{messageID: "gmail-1"}
@@ -42,9 +41,7 @@ func TestGmailClient_Send_EncodesRawMessage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gmail-1", id)
 
-	decoded, err := base64.URLEncoding.DecodeString(fake.lastRaw)
-	require.NoError(t, err)
-	assert.Contains(t, string(decoded), "hello")
+	assert.Contains(t, string(fake.lastRaw), "hello")
 }
 
 func TestGmailClient_Send_APIError_Propagates(t *testing.T) {

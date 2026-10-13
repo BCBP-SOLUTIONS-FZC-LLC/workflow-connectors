@@ -261,14 +261,11 @@ func (rt *redirectingTransport) RoundTrip(req *http.Request) (*http.Response, er
 }
 
 // The GCS client never follows a redirect: the bearer token would go with it.
-// Not parallel: it swaps http.DefaultTransport, which the GCS transport and
-// the token client both use.
+// Not parallel: it swaps the GCS transport and http.DefaultTransport.
 func TestOpenGCSBucket_NeverFollowsRedirects(t *testing.T) {
 	t.Setenv("STORAGE_EMULATOR_HOST", "")
 	rt := &redirectingTransport{}
-	orig := http.DefaultTransport
-	http.DefaultTransport = rt
-	t.Cleanup(func() { http.DefaultTransport = orig })
+	useGCSTransport(t, rt)
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)

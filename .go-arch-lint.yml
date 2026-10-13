@@ -25,6 +25,10 @@ vendors:
     in: gocloud.dev/**
   google-api:
     in: google.golang.org/api/**
+  # The GCS client under gocloud's gcsblob: the adapter builds it to turn its
+  # retries off (the library never retries).
+  gcs-sdk:
+    in: cloud.google.com/go/storage
   oauth2:
     in:
       - golang.org/x/oauth2
@@ -189,6 +193,7 @@ deps:
       - azure-sdk
       - gocloud
       - google-api
+      - gcs-sdk
       - oauth2
       - sendgrid
 

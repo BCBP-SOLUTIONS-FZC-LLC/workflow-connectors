@@ -4,10 +4,13 @@ package sqlstore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,8 +111,10 @@ func blockedPrunes(t *testing.T, pool *pgcommon.Pool) int {
 	return n
 }
 
-// A Reserve whose statement failed reserved nothing (sendintent.ErrNotReserved);
-// one that failed at COMMIT may have committed, and is not marked.
+// A Reserve that failed before COMMIT was sent reserved nothing
+// (sendintent.ErrNotReserved): its statement failed, or no connection could
+// be acquired (pool closed, pool exhausted until the context expired). One
+// that failed at COMMIT may have committed, and is not marked.
 func TestPostgres_Reserve_MarksOnlyFailuresThatReservedNothing(t *testing.T) {
 	t.Parallel()
 
@@ -124,6 +129,34 @@ func TestPostgres_Reserve_MarksOnlyFailuresThatReservedNothing(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, sendintent.ErrNotReserved)
 		assert.True(t, shared.IsTransient(err), "the class is kept")
+	})
+
+	t.Run("pool closed", func(t *testing.T) {
+		t.Parallel()
+		store, pool := isolatedStore(t)
+		pool.Close()
+		_, _, err := store.Reserve(context.Background(), "t", "k", 0, "tok")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, sendintent.ErrNotReserved, "no connection: nothing was sent to PostgreSQL")
+		class, reason := shared.ClassOf(err)
+		assert.Equal(t, shared.ClassUnknown, class, "a closed pool keeps its class")
+		assert.Equal(t, "postgres pool closed", reason)
+	})
+
+	t.Run("pool exhausted", func(t *testing.T) {
+		t.Parallel()
+		store, pool, release := exhaustedPool(t)
+		defer release()
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, _, err := store.Reserve(ctx, "t", "k", 0, "tok")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, sendintent.ErrNotReserved, "no connection was acquired: nothing was reserved")
+		assert.True(t, shared.IsTransient(err), "an acquire timeout is transient: %v", err)
+		release()
+		_, found, err := sqlstore.New(pool).Get(context.Background(), "t", "k")
+		require.NoError(t, err)
+		assert.False(t, found)
 	})
 
 	t.Run("commit failed", func(t *testing.T) {
@@ -185,4 +218,94 @@ func TestPostgres_Migrations_ValidateAndPruneIndex(t *testing.T) {
 		_, err = conn.Exec(ctx, `RESET enable_seqscan`)
 		return err
 	}))
+}
+
+// exhaustedPool is an isolated store on a pool of one connection, held by
+// another caller until release is called (idempotent).
+func exhaustedPool(t *testing.T) (*sqlstore.Store, *pgcommon.Pool, func()) {
+	t.Helper()
+	_, _, dsn := isolatedSchema(t)
+	pool, err := pgcommon.NewPool(context.Background(), pgcommon.Config{DSN: dsn, MaxConns: 1, PoolName: "sendintent_exhausted_test"})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	held, stop, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- pool.WithConn(context.Background(), func(context.Context, *pgcommon.Conn) error {
+			close(held)
+			<-stop
+			return nil
+		})
+	}()
+	<-held
+	var once sync.Once
+	release := func() { once.Do(func() { close(stop); require.NoError(t, <-done) }) }
+	t.Cleanup(release)
+	return sqlstore.New(pool), pool, release
+}
+
+// Migration 000005 repairs what an operator's CREATE INDEX CONCURRENTLY can
+// leave behind: an INVALID index (the build failed or was cancelled) is
+// dropped and rebuilt, a valid one is kept, a missing one is created.
+func TestPostgres_Migration000005_RepairsAnInvalidPruneIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	indexState := func(t *testing.T, pool *pgcommon.Pool) (oid uint32, valid, found bool) {
+		t.Helper()
+		require.NoError(t, pool.WithConn(ctx, func(ctx context.Context, conn *pgcommon.Conn) error {
+			err := conn.QueryRow(ctx, `SELECT i.indexrelid::oid, i.indisvalid FROM pg_index i
+				JOIN pg_class c ON c.oid = i.indexrelid
+				WHERE i.indrelid = 'connector_send_intents'::regclass AND c.relname = 'ix_connector_send_intents_prune'`).Scan(&oid, &valid)
+			if errors.Is(err, pgcommon.ErrNoRows) {
+				return nil
+			}
+			found = err == nil
+			return err
+		}))
+		return oid, valid, found
+	}
+	reapply := func(t *testing.T, pool *pgcommon.Pool, dsn string) {
+		t.Helper()
+		require.NoError(t, execSQL(pool, `UPDATE `+sqlstore.MigrationsTable+` SET version = 4, dirty = false`))
+		require.NoError(t, sqlstore.ApplySchema(ctx, &migrate.Runner{DSN: dsn}))
+	}
+
+	t.Run("invalid index is rebuilt", func(t *testing.T) {
+		t.Parallel()
+		_, pool, dsn := isolatedSchema(t)
+		before, _, _ := indexState(t, pool)
+		// What a failed CREATE INDEX CONCURRENTLY leaves: the index exists
+		// but is not valid (the test database's role is a superuser).
+		require.NoError(t, execSQL(pool, `UPDATE pg_index SET indisvalid = false
+			WHERE indexrelid = 'ix_connector_send_intents_prune'::regclass`))
+		_, valid, found := indexState(t, pool)
+		require.True(t, found)
+		require.False(t, valid)
+
+		reapply(t, pool, dsn)
+		after, valid, found := indexState(t, pool)
+		require.True(t, found)
+		assert.True(t, valid, "the invalid index was rebuilt")
+		assert.NotEqual(t, before, after, "a new index, not the invalid one")
+	})
+
+	t.Run("valid index is kept", func(t *testing.T) {
+		t.Parallel()
+		_, pool, dsn := isolatedSchema(t)
+		before, _, _ := indexState(t, pool)
+		reapply(t, pool, dsn)
+		after, valid, found := indexState(t, pool)
+		require.True(t, found)
+		assert.True(t, valid)
+		assert.Equal(t, before, after, "a valid index (built CONCURRENTLY beforehand) is not rebuilt")
+	})
+
+	t.Run("missing index is created", func(t *testing.T) {
+		t.Parallel()
+		_, pool, dsn := isolatedSchema(t)
+		require.NoError(t, execSQL(pool, `DROP INDEX ix_connector_send_intents_prune`))
+		reapply(t, pool, dsn)
+		_, valid, found := indexState(t, pool)
+		require.True(t, found)
+		assert.True(t, valid)
+	})
 }

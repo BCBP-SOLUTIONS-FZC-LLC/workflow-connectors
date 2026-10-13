@@ -63,7 +63,14 @@ func (s faultyStore) Get(ctx context.Context, id documents.Identity) (documents.
 // through to the fake Drive.
 type faultyAPI struct {
 	*fakeDriveFilesAPI
-	listErr, listByNameErr, updateErr, deleteErr error
+	listErr, listByNameErr, updateErr, deleteErr, getErr error
+}
+
+func (a faultyAPI) get(ctx context.Context, fileID string) (*driveFile, error) {
+	if a.getErr != nil {
+		return nil, a.getErr
+	}
+	return a.fakeDriveFilesAPI.get(ctx, fileID)
 }
 
 func (a faultyAPI) listByName(ctx context.Context, folderID, name string) ([]*driveFile, error) {
@@ -197,16 +204,22 @@ func TestDrive_ReUpload_UpdateFailure_FailsWithoutCreating(t *testing.T) {
 		c := newTestClient(api, store)
 		require.NoError(t, c.Upload(ctx, folder, "a.pdf", []byte("v1"), ""))
 
-		api.mu.Lock()
-		api.err = errFakeDrive
-		api.mu.Unlock()
+		c.api = faultyAPI{fakeDriveFilesAPI: api, updateErr: errFakeDrive}
 		err := c.Upload(ctx, folder, "a.pdf", []byte("v2"), "")
 		require.ErrorIs(t, err, shared.ErrUpstream)
+		require.ErrorIs(t, err, errFakeDrive)
 
-		creates, updates := api.calls()
+		creates, _ := api.calls()
 		assert.Equal(t, 1, creates)
-		assert.Equal(t, 1, updates)
+		assert.Equal(t, []string{"v1"}, api.contentNamed(folder, "a.pdf"))
 		assert.Equal(t, documents.StateFailed, getDoc(t, ctx, store, "a.pdf").State)
+
+		// The same when the check of the recorded file (files.get) fails.
+		c.api = faultyAPI{fakeDriveFilesAPI: api, getErr: errFakeDrive}
+		require.ErrorIs(t, c.Upload(ctx, folder, "a.pdf", []byte("v3"), ""), errFakeDrive)
+		creates, _ = api.calls()
+		assert.Equal(t, 1, creates)
+		assert.Equal(t, []string{"v1"}, api.contentNamed(folder, "a.pdf"))
 	})
 }
 

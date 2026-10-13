@@ -15,7 +15,7 @@ sequenceDiagram
     W2 -->> W2: InProgressError{documentID} (retryable, never touches Drive)
 
     W1 ->> DB: Advance → UPLOADING (WHERE owner = A AND lease live)
-    alt row records a Drive file ID
+    alt row records a Drive file ID, still in the folder and not trashed (files.get)
         W1 ->> D: update(fileID)
     else a crashed attempt left a file tagged connectorDocumentId = id
         W1 ->> D: update(adopted fileID)
