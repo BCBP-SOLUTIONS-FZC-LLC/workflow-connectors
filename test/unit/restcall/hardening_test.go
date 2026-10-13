@@ -99,18 +99,90 @@ func TestRestCall_TransportError_IsUpstream(t *testing.T) {
 	assert.True(t, errors.Is(err, shared.ErrUpstream))
 }
 
-func TestRestCall_OversizedResponse_IsRejected(t *testing.T) {
+// A 2xx whose body exceeds the cap was processed by the service: the call
+// fails permanently ("response too large"), never as invalid input, and the
+// output still reports the status, headers and method.
+func TestRestCall_OversizedResponse_IsPermanentNotValidation(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Request-Id", "r-1")
+		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write(make([]byte, shared.MaxResponseBytes+1))
 	}))
 	defer srv.Close()
 
-	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
-	_, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	aliases := aliasconfig.Config{RestCall: []aliasconfig.Endpoint{
+		{Alias: "a", Method: "post", BaseURL: srv.URL, PathTemplate: "/x"},
+	}}
+	conn := restcall.New(aliases, nil, "t")
+	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, shared.ErrValidation))
+	assert.False(t, errors.Is(err, shared.ErrValidation), "the input was valid")
+	assert.ErrorIs(t, err, shared.ErrTooLarge)
+	assert.ErrorIs(t, err, shared.ErrUpstream)
+	class, reason := shared.ClassOf(err)
+	assert.Equal(t, shared.ClassPermanent, class)
+	assert.Equal(t, restcall.ReasonResponseTooLarge, reason)
+
+	require.NotNil(t, out)
+	assert.Equal(t, http.StatusCreated, out["status"])
+	assert.Equal(t, http.MethodPost, out["method"])
+	assert.Equal(t, "r-1", out["headers"].(map[string]any)["X-Request-Id"])
+	assert.Equal(t, true, out["bodyTruncated"])
+	assert.Len(t, out["body"], int(shared.MaxResponseBytes))
+}
+
+// A body whose read fails keeps the status and method in the output; the
+// read error is classified by its cause.
+func TestRestCall_ResponseReadError_KeepsStatusAndMethod(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+	}))
+	defer srv.Close()
+
+	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
+	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, shared.ErrUpstream)
+	assert.Equal(t, http.StatusOK, out["status"])
+	assert.Equal(t, http.MethodGet, out["method"])
+	assert.Nil(t, out["body"])
+}
+
+// Every result once the request was sent carries the method used: success,
+// an HTTP error status and a transport error.
+func TestRestCall_OutputCarriesMethod(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	aliases := aliasconfig.Config{RestCall: []aliasconfig.Endpoint{
+		{Alias: "ok", Method: "put", BaseURL: srv.URL, PathTemplate: "/ok"},
+		{Alias: "fail", Method: "PATCH", BaseURL: srv.URL, PathTemplate: "/fail"},
+	}}
+	conn := restcall.New(aliases, nil, "t")
+
+	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "ok"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPut, out["method"])
+
+	out, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "fail"})
+	require.Error(t, err)
+	assert.Equal(t, http.MethodPatch, out["method"])
+
+	srv.Close() // connection refused from now on
+	out, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "ok"})
+	require.Error(t, err)
+	assert.Equal(t, map[string]any{"method": http.MethodPut}, out)
+	assert.True(t, shared.IsTransient(err))
 }
 
 func TestRestCall_SetCookieNotReturned(t *testing.T) {

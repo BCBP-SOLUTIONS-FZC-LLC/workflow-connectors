@@ -2,17 +2,22 @@ package gocloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/googleapi"
 
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
@@ -32,6 +37,15 @@ type gocloudStorageClient struct {
 	// httpClient is this client's own transport, when it has one (aws-s3),
 	// so Close can drop its idle connections.
 	httpClient *http.Client
+	// objectMissing reports whether a failed delete means only that the
+	// object does not exist, in a bucket that does: gocloud maps a missing
+	// bucket, a wrong S3 region, a GCS 403 and an unknown Azure account to
+	// the same NotFound code, and none of those is "already deleted". A
+	// non-nil error replaces the delete's own and names what failed (the
+	// provider's bucket check, or the delete with an explanation added).
+	// Every provider sets it; nil (in-memory test buckets only) falls back
+	// to gocloud's NotFound code.
+	objectMissing func(ctx context.Context, err error) (bool, error)
 }
 
 func NewProvider(ctx context.Context, params map[string]any) (storage.ProviderClient, error) {
@@ -73,11 +87,110 @@ func openS3Bucket(ctx context.Context, bucketName string, params map[string]any)
 		HTTPClient:  httpClient,
 	}
 
-	bucket, err := s3blob.OpenBucket(ctx, s3.NewFromConfig(cfg), bucketName, nil)
+	client := newS3Client(cfg)
+	bucket, err := s3blob.OpenBucket(ctx, client, bucketName, nil)
 	if err != nil {
 		return nil, upstream(fmt.Sprintf("aws-s3 open bucket %q", bucketName), err)
 	}
-	return &gocloudStorageClient{bucket: bucket, httpClient: httpClient}, nil
+	headBucket := func(ctx context.Context) error {
+		_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucketName)})
+		return err
+	}
+	return &gocloudStorageClient{bucket: bucket, httpClient: httpClient, objectMissing: s3ObjectMissing(headBucket)}, nil
+}
+
+// s3ListBucketHint explains an S3 403 on a delete: S3 answers 403 rather
+// than 404 for a missing object to a credential without s3:ListBucket, so
+// such a credential can never delete an already-deleted object.
+const s3ListBucketHint = "access denied: the aws-s3 credential needs s3:GetObject and s3:DeleteObject on the objects " +
+	"and s3:ListBucket on the bucket (without s3:ListBucket, S3 answers 403 rather than 404 for a missing object, " +
+	"so a delete of an already-deleted object fails)"
+
+// s3Forbidden returns an HTTP 403 with s3ListBucketHint added, keeping err
+// (and its class) in the chain; nil for any other error.
+func s3Forbidden(err error) error {
+	var status interface{ HTTPStatusCode() int }
+	if errors.As(err, &status) && status.HTTPStatusCode() == http.StatusForbidden {
+		return fmt.Errorf("%s: %w", s3ListBucketHint, err)
+	}
+	return nil
+}
+
+// s3ObjectMissing: gocloud deletes an S3 object by reading its attributes
+// first (HeadObject), and a HEAD response has no body, so a missing object
+// and a missing bucket both come back as a bare 404 "NotFound". The bucket is
+// then checked with HeadBucket: an object can only be missing from a bucket
+// that exists. (HeadObject answers 404 rather than 403 only to a credential
+// with s3:ListBucket, which is what HeadBucket needs.) A wrong region (301),
+// a forbidden key or any other code is never "already deleted"; a 403, from
+// the delete or the bucket check, says which permissions are needed.
+func s3ObjectMissing(headBucket func(context.Context) error) func(context.Context, error) (bool, error) {
+	return func(ctx context.Context, err error) (bool, error) {
+		if forbidden := s3Forbidden(err); forbidden != nil {
+			return false, forbidden
+		}
+		var coded interface{ ErrorCode() string }
+		if !errors.As(err, &coded) {
+			return false, nil
+		}
+		switch coded.ErrorCode() {
+		case "NoSuchKey":
+			return true, nil
+		case "NotFound":
+			if err := headBucket(ctx); err != nil {
+				if forbidden := s3Forbidden(err); forbidden != nil {
+					err = forbidden
+				}
+				return false, fmt.Errorf("aws-s3 bucket check (HeadBucket): %w", err)
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+}
+
+// azureObjectMissing: only Azure's BlobNotFound means the blob is missing
+// from a container that exists; ContainerNotFound, an unknown account (DNS
+// "no such host") and any other 404 are failures.
+func azureObjectMissing(_ context.Context, err error) (bool, error) {
+	return bloberror.HasCode(err, bloberror.BlobNotFound), nil
+}
+
+// gcsObjectMissing: the GCS client reports a 404 on an object call as
+// "object doesn't exist" whether the object or its bucket is missing. The
+// API's message differs, but its wording is not a contract (and a proxy can
+// rewrite it), so a 404 is "already deleted" only once listBucket confirms
+// the bucket exists: a missing bucket fails the list with its own 404,
+// permanent. Listing needs storage.objects.list, which every object role
+// (roles/storage.objectAdmin, objectUser, objectViewer) grants, where reading
+// the bucket's metadata needs storage.buckets.get, which they do not. A 403
+// (which gocloud also maps to NotFound) is never "already deleted".
+func gcsObjectMissing(listBucket func(context.Context) error) func(context.Context, error) (bool, error) {
+	return func(ctx context.Context, err error) (bool, error) {
+		var apiErr *googleapi.Error
+		if !errors.As(err, &apiErr) || apiErr.Code != http.StatusNotFound {
+			return false, nil
+		}
+		if err := listBucket(ctx); err != nil {
+			return false, fmt.Errorf("gcp-gcs bucket check (objects.list): %w", err)
+		}
+		return true, nil
+	}
+}
+
+// gcsListBucket lists at most one object of the bucket: it succeeds exactly
+// when the bucket exists and the credential may list it.
+func gcsListBucket(bucket *blob.Bucket) func(context.Context) error {
+	return func(ctx context.Context) error {
+		_, _, err := bucket.ListPage(ctx, blob.FirstPageToken, 1, nil)
+		return err
+	}
+}
+
+// codeNotFound is the fallback for a bucket with no provider check
+// (in-memory test buckets).
+func codeNotFound(_ context.Context, err error) (bool, error) {
+	return gcerrors.Code(err) == gcerrors.NotFound, nil
 }
 
 func openAzureBucket(ctx context.Context, containerName string, params map[string]any) (storage.ProviderClient, error) {
@@ -113,7 +226,7 @@ func openAzureBucket(ctx context.Context, containerName string, params map[strin
 	if err != nil {
 		return nil, upstream(fmt.Sprintf("azure-blob open container %q", containerName), err)
 	}
-	return &gocloudStorageClient{bucket: bucket}, nil
+	return &gocloudStorageClient{bucket: bucket, objectMissing: azureObjectMissing}, nil
 }
 
 // SDK constructors, replaceable in tests. With the arguments passed here they
@@ -123,6 +236,7 @@ var (
 	newAzureContainerClient = container.NewClientWithSharedKeyCredential
 	openAzureBlobBucket     = azureblob.OpenBucket
 	newGCSHTTPClient        = gcp.NewHTTPClient
+	newS3Client             = func(cfg aws.Config) *s3.Client { return s3.NewFromConfig(cfg) }
 )
 
 var azureAccountPattern = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
@@ -164,7 +278,7 @@ func openGCSBucket(ctx context.Context, bucketName string, params map[string]any
 	if err != nil {
 		return nil, upstream(fmt.Sprintf("gcp-gcs open bucket %q", bucketName), err)
 	}
-	return &gocloudStorageClient{bucket: bucket}, nil
+	return &gocloudStorageClient{bucket: bucket, objectMissing: gcsObjectMissing(gcsListBucket(bucket))}, nil
 }
 
 func (c *gocloudStorageClient) Fetch(ctx context.Context, _, key string, maxBytes int64) ([]byte, string, error) {
@@ -200,26 +314,71 @@ func (c *gocloudStorageClient) Upload(ctx context.Context, _, key string, conten
 	return nil
 }
 
-// Delete removes the object. An object that does not exist is already
-// deleted: Delete is idempotent, so a retry after a lost response, or a
-// delete of an object removed elsewhere, succeeds.
+// Delete removes the object. An object that does not exist, in a bucket that
+// does, is already deleted: Delete is idempotent, so a retry after a lost
+// response, or a delete of an object removed elsewhere, succeeds. A missing
+// bucket or container, a wrong region, a forbidden request or an unknown
+// account is an error (permanent), never success.
 func (c *gocloudStorageClient) Delete(ctx context.Context, _, key string) error {
-	if err := c.bucket.Delete(ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
-		return upstream(fmt.Sprintf("gocloud delete %q", key), err)
+	err := c.bucket.Delete(ctx, key)
+	if err == nil {
+		return nil
 	}
-	return nil
+	check := c.objectMissing
+	if check == nil {
+		check = codeNotFound
+	}
+	missing, checkErr := check(ctx, err)
+	switch {
+	case checkErr != nil:
+		return upstream(fmt.Sprintf("gocloud delete %q", key), checkErr)
+	case missing:
+		return nil
+	}
+	return upstream(fmt.Sprintf("gocloud delete %q", key), err)
 }
 
-// upstream wraps a provider error as ErrUpstream with its class: the
-// provider's own signal first (an S3 error code such as NoSuchKey or SlowDown,
-// an HTTP status, a network failure), else gocloud's portable error code,
-// which covers Azure and GCS.
+// upstream wraps a provider error as ErrUpstream with its class.
 func upstream(op string, err error) error {
+	class, reason := classify(err)
+	return fmt.Errorf("%w: %s: %w", shared.ErrUpstream, op, shared.WithClass(class, reason, err))
+}
+
+// classify reads the provider's own signal first: an Azure or GCS response's
+// HTTP status (neither SDK error exposes one the shared classifier reads), an
+// Azure account host that does not resolve, then an S3 error code, an HTTP
+// status or a network failure (shared.ClassifyCause), else gocloud's portable
+// error code.
+//
+// An Azure NXDOMAIN is unknown, neither transient nor permanent: the host is
+// derived from the account name, so it usually means the account does not
+// exist, but a private-endpoint or split-horizon DNS outage answers NXDOMAIN
+// for a real account too. Unknown is never retried automatically
+// (connectors.DecideRetry), as a permanent error would not be, but it does
+// not tell the worker the account is misconfigured when it may be fine: the
+// call can be re-run by a person once DNS is back.
+func classify(err error) (shared.Class, string) {
+	var azErr *azcore.ResponseError
+	if errors.As(err, &azErr) && azErr.StatusCode != 0 {
+		return shared.ClassifyHTTPStatus(azErr.StatusCode), fmt.Sprintf("azure http %d", azErr.StatusCode)
+	}
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) && gErr.Code != 0 {
+		return shared.ClassifyHTTPStatus(gErr.Code), fmt.Sprintf("gcs http %d", gErr.Code)
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound && isAzureBlobHost(dnsErr.Name) {
+		return shared.ClassUnknown, "azure account host not found (NXDOMAIN)"
+	}
 	class, reason := shared.ClassifyCause(err)
 	if class == shared.ClassUnknown {
 		class, reason = classifyCode(gcerrors.Code(err))
 	}
-	return fmt.Errorf("%w: %s: %w", shared.ErrUpstream, op, shared.WithClass(class, reason, err))
+	return class, reason
+}
+
+func isAzureBlobHost(host string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), ".blob.core.windows.net")
 }
 
 func classifyCode(code gcerrors.ErrorCode) (shared.Class, string) {
@@ -257,5 +416,5 @@ func (c *gocloudStorageClient) Close() error {
 // newTransportClient gives a client its own connection pool, so closing it
 // never affects another tenant's client.
 func newTransportClient() *http.Client {
-	return &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	return &http.Client{Transport: shared.BaseTransport()}
 }

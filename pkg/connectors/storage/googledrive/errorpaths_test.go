@@ -222,20 +222,28 @@ func TestDrive_Create_LeftoverListFailure_IsIgnored(t *testing.T) {
 	assert.Equal(t, 1, fake.filesNamed(folder, "a.pdf"))
 }
 
-// A row whose upload failed before any file was written has nothing to fetch:
-// a permanent error, not a lookup by name.
-func TestDrive_Fetch_FailedRowWithoutFile_IsPermanent(t *testing.T) {
+// A row whose upload failed before any file was written has no file of its
+// own: a fetch reads what the delete would remove and a retried upload would
+// adopt — the oldest untagged file of the name — and is not found (permanent)
+// when there is none.
+func TestDrive_Fetch_FailedRowWithoutFile_FallsBackToName(t *testing.T) {
 	forEachStore(t, func(t *testing.T, store documents.Store) {
 		ctx, api := tenantCtx(), newFakeDriveFilesAPI()
 		api.failCreates = 1
 		c := newTestClient(api, store)
 		require.Error(t, c.Upload(ctx, folder, "a.pdf", []byte("x"), ""))
+		require.Equal(t, documents.StateFailed, getDoc(t, ctx, store, "a.pdf").State)
 
 		_, _, err := c.Fetch(ctx, folder, "a.pdf", 1<<20)
 		require.ErrorIs(t, err, shared.ErrUpstream)
 		class, _ := shared.ClassOf(err)
 		assert.Equal(t, shared.ClassPermanent, class)
-		assert.Contains(t, err.Error(), "has no stored file (state FAILED)")
+		assert.Contains(t, err.Error(), `no file named "a.pdf"`)
+
+		api.placeFile(folder, "a.pdf", "", []byte("placed by a person"))
+		content, _, err := c.Fetch(ctx, folder, "a.pdf", 1<<20)
+		require.NoError(t, err)
+		assert.Equal(t, "placed by a person", string(content))
 	})
 }
 

@@ -62,7 +62,8 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 	reqCtx, cancel := context.WithTimeout(ctx, shared.CallTimeout(ep.Timeout))
 	defer cancel()
 
-	req, err := shared.NewInternalRequest(reqCtx, strings.ToUpper(ep.Method), ep.BaseURL, path, body)
+	method := strings.ToUpper(ep.Method)
+	req, err := shared.NewInternalRequest(reqCtx, method, ep.BaseURL, path, body)
 	if err != nil {
 		return nil, fmt.Errorf("rest-call %q: %w", alias, err)
 	}
@@ -75,9 +76,11 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 	req.Header.Set(shared.InternalTokenHeader, r.internalToken)
 	req.Header.Set(shared.DepartmentsHeader, departments)
 
+	// From here on every result, failures included, carries the method sent,
+	// so the worker's DecideRetry needs no second alias lookup.
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return nil, shared.Classify(fmt.Sprintf("rest-call %q", alias), err)
+		return map[string]any{"method": method}, shared.Classify(fmt.Sprintf("rest-call %q", alias), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -87,23 +90,38 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		// (shared.DecodeErrorResponseBody), so an oversized or cut-off error
 		// page can never turn a transient 503 into a permanent error.
 		body, truncated := shared.DecodeErrorResponseBody(resp)
-		out := output(resp, body)
+		out := output(resp, method, body)
 		if truncated {
 			out["bodyTruncated"] = true
 		}
 		return out, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.HTTPStatusError(resp.StatusCode, fmt.Errorf("rest-call %q: status %d", alias, resp.StatusCode)))
 	}
 
-	respBody, err := shared.DecodeResponseBody(resp)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, shared.MaxResponseBytes+1))
 	if err != nil {
-		return nil, shared.Classify(fmt.Sprintf("rest-call %q: reading response", alias), err)
+		return output(resp, method, nil), shared.Classify(fmt.Sprintf("rest-call %q: reading response", alias), err)
 	}
-	return output(resp, respBody), nil
+	if int64(len(raw)) > shared.MaxResponseBytes {
+		// The service processed the call: this is not invalid input, and a
+		// retry would get the same oversized body. Report what is known.
+		out := output(resp, method, strings.ToValidUTF8(string(raw[:shared.MaxResponseBytes]), ""))
+		out["bodyTruncated"] = true
+		return out, fmt.Errorf("%w: %w", shared.ErrUpstream, shared.Permanent(ReasonResponseTooLarge,
+			fmt.Errorf("%w: rest-call %q: status %d response body exceeds the %d-byte limit", shared.ErrTooLarge, alias, resp.StatusCode, shared.MaxResponseBytes)))
+	}
+	return output(resp, method, shared.DecodeBody(raw, resp.Header.Get("Content-Type"))), nil
 }
 
-func output(resp *http.Response, body any) map[string]any {
+// ReasonResponseTooLarge is the ClassOf reason of a successful (2xx) call
+// whose response body exceeded shared.MaxResponseBytes: a permanent failure,
+// but not invalid input — the service did process the request. It equals
+// shared.ReasonResponseTooLarge, which sql-query uses too.
+const ReasonResponseTooLarge = shared.ReasonResponseTooLarge
+
+func output(resp *http.Response, method string, body any) map[string]any {
 	return map[string]any{
 		"status":  resp.StatusCode,
+		"method":  method,
 		"headers": shared.FlattenHeaders(resp.Header),
 		"body":    body,
 	}

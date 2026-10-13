@@ -61,9 +61,14 @@ PKGSITE_VERSION     ?= v0.5.0
 GOLANGCI_LINT ?= $(GO) tool -modfile=tools/go.mod golangci-lint
 
 # Integration infrastructure: docker-compose.yml (postgres, pgbouncer, valkey,
-# floci). Host ports are overridable; the TEST_* variables the tests read are
-# derived from the same values, so a port change needs no other edit.
+# floci, and the valkey-cluster profile). Host ports are overridable; the
+# TEST_* variables the tests read are derived from the same values, so a port
+# change needs no other edit. The cluster's ports are fixed (57001-57003: its
+# nodes announce the host port), see docker-compose.yml.
 COMPOSE           ?= docker compose
+# Compose profiles docker-up / docker-down enable: the three-master Valkey
+# Cluster the slot-migration test (TEST_VALKEY_CLUSTER_ADDRS) runs against.
+COMPOSE_PROFILE_FLAGS ?= --profile valkey-cluster
 WC_PG_PORT        ?= 55432
 WC_PGBOUNCER_PORT ?= 55433
 WC_VALKEY_PORT    ?= 56379
@@ -77,6 +82,7 @@ INT_ENV := TEST_POSTGRES_DSN='postgres://postgres:test@localhost:$(WC_PG_PORT)/c
            TEST_PGBOUNCER_DSN='postgres://postgres:test@localhost:$(WC_PGBOUNCER_PORT)/connectors?sslmode=disable' \
            TEST_VALKEY_ADDR='localhost:$(WC_VALKEY_PORT)' \
            TEST_S3_ENDPOINT='http://localhost:$(WC_FLOCI_PORT)' \
+           TEST_VALKEY_CLUSTER_ADDRS='127.0.0.1:57001,127.0.0.1:57002,127.0.0.1:57003' \
            TEST_VALKEY_DOCKER=1
 
 # -----------------------------
@@ -115,6 +121,7 @@ help:
 	@echo "  make lint            - run golangci-lint (default build + every test build tag)"
 	@echo "  make arch-lint       - run go-arch-lint against .go-arch-lint.yml"
 	@echo "  make docs-check      - ARCHITECTURE.md diagrams identical to docs/architecture/mermaid/*.mmd"
+	@echo "  make docs-compile    - the worker skeleton in docs/integration/connector-worker.md compiles"
 	@echo "  make ci-scripts-test - regression tests for the CI scripts (detect-changes.sh)"
 	@echo "  make api-compat      - apidiff vs the last release tag (API_NEW_VERSION=vX.Y.Z: fail unless compatible or a major bump)"
 	@echo "  make test            - unit + postgres + integration tests (requires Docker)"
@@ -126,8 +133,8 @@ help:
 	@echo "  make build           - compile-check all packages"
 	@echo "  make cover           - coverage HTML report"
 	@echo "  make cover-func      - coverage summary by function"
-	@echo "  make ci              - tidy-check + fmt-check + vet + lint + arch-lint + docs-check + ci-scripts-test + test-ci + build"
-	@echo "  make docker-up       - start docker-compose.yml (postgres, pgbouncer, valkey, floci) and wait until healthy"
+	@echo "  make ci              - tidy-check + fmt-check + vet + lint + arch-lint + docs-check + docs-compile + ci-scripts-test + test-ci + build"
+	@echo "  make docker-up       - start docker-compose.yml (postgres, pgbouncer, valkey, floci, valkey-cluster) and wait until healthy"
 	@echo "  make docker-down     - stop local containers and delete their volumes"
 	@echo "  make mod-verify      - go mod verify"
 	@echo "  make vuln-check      - govulncheck on pkg (pinned $(GOVULNCHECK_VERSION))"
@@ -201,6 +208,13 @@ arch-lint:
 .PHONY: docs-check
 docs-check:
 	python3 scripts/docs_check.py
+
+# docs-compile: the worker skeleton in docs/integration/connector-worker.md
+# compiles (and vets) against this checkout, in a scratch module with a
+# replace directive (scripts/docs_compile.sh). validate-quality.yml runs it.
+.PHONY: docs-compile
+docs-compile:
+	GO=$(GO) bash scripts/docs_compile.sh
 
 # ci-scripts-test: regression tests for the CI shell scripts (no bats; scratch
 # git repositories): detect-changes.sh's docs-only decision and log
@@ -313,20 +327,20 @@ build:
 
 .PHONY: docker-up
 docker-up:
-	@echo "Starting local PostgreSQL + PgBouncer + Valkey + floci (S3)..."
-	$(COMPOSE) up -d --wait
+	@echo "Starting local PostgreSQL + PgBouncer + Valkey + Valkey Cluster + floci (S3)..."
+	$(COMPOSE) $(COMPOSE_PROFILE_FLAGS) up -d --wait
 
 .PHONY: docker-down
 docker-down:
 	@echo "Stopping local containers..."
-	$(COMPOSE) down -v --remove-orphans
+	$(COMPOSE) $(COMPOSE_PROFILE_FLAGS) down -v --remove-orphans
 
 # -----------------------------
 # CI
 # -----------------------------
 
 .PHONY: ci
-ci: tidy-check fmt-check vet lint arch-lint docs-check ci-scripts-test test-ci build
+ci: tidy-check fmt-check vet lint arch-lint docs-check docs-compile ci-scripts-test test-ci build
 
 # -----------------------------
 # COVERAGE

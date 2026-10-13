@@ -32,6 +32,13 @@ func execSQL(pool *pgcommon.Pool, query string, args ...any) error {
 // failures without touching the shared one.
 func isolatedStore(t *testing.T) (*sqlstore.Store, *pgcommon.Pool) {
 	t.Helper()
+	store, pool, _ := isolatedSchema(t)
+	return store, pool
+}
+
+// isolatedSchema is isolatedStore, with the DSN of its schema.
+func isolatedSchema(t *testing.T) (*sqlstore.Store, *pgcommon.Pool, string) {
+	t.Helper()
 	shared := postgres(t)
 	if shared == nil {
 		t.Skip("TEST_POSTGRES_DSN not set")
@@ -52,7 +59,7 @@ func isolatedStore(t *testing.T) (*sqlstore.Store, *pgcommon.Pool) {
 	pool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: dsn, MaxConns: 4, PoolName: "sendintent_coverage_test"})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	return sqlstore.New(pool), pool
+	return sqlstore.New(pool), pool, dsn
 }
 
 func TestApplySchema_NeedsADSN(t *testing.T) {
@@ -116,9 +123,12 @@ func TestPostgres_ReadBackFailures(t *testing.T) {
 	_, reserved, err := store.Reserve(ctx, tenant, "invoice-1", 0, "")
 	assert.False(t, reserved)
 	assert.ErrorContains(t, err, "load existing")
+	assert.ErrorIs(t, err, sendintent.ErrNotReserved, "the upsert changed nothing: nothing was reserved")
 
 	err = store.Record(ctx, id, 2, sendintent.StatusAccepted, "m", "")
-	assert.ErrorIs(t, err, sendintent.ErrIntentNotFound, "an unreadable intent cannot be shown to be stale")
+	assert.ErrorContains(t, err, "sendintent: record: load intent", "the failed lookup is reported")
+	assert.NotErrorIs(t, err, sendintent.ErrIntentNotFound, "a failed lookup is not a missing intent")
+	assert.NotErrorIs(t, err, sendintent.ErrStaleRecord)
 }
 
 // A pending intent may be resent only once it is stale (unchanged for

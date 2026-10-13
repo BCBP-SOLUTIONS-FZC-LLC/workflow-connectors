@@ -86,6 +86,42 @@ type Store interface {
 	Record(ctx context.Context, intentID string, attempt int, status Status, providerMessageID, detail string) error
 }
 
+// Releaser is implemented by a Store that can release a reservation by its
+// token (MemoryStore and sqlstore.Store do). A caller whose Reserve failed
+// ambiguously (the reply was lost; the reservation may have committed)
+// and that cannot read its reservation back cannot tell whether it is
+// left pending: if it is, it would refuse every retry with the same
+// messageKey as a duplicate although nothing was sent. Release marks the
+// intent not_delivered only while it is still pending under token — the
+// caller has sent nothing under it — and changes nothing otherwise (no
+// intent, another caller's token, already finished); that is not an error.
+// released reports whether it changed the intent: only then is it certain
+// that no reservation of the caller is left pending. Nothing released after
+// an ambiguous Reserve is not proof that nothing was reserved: the commit
+// may become visible later (for example once a synchronous standby
+// confirms it). It is optional so Store stays unchanged; without it such a
+// failure is reported as not retryable automatically.
+type Releaser interface {
+	Release(ctx context.Context, tenantID, messageKey, token string) (released bool, err error)
+}
+
+// ReleasedDetail is the detail Release records on the intent it releases.
+const ReleasedDetail = "reservation released: its caller could not confirm it, and sent nothing"
+
+// ErrPruneArgs: PruneIntents needs a positive age and batch.
+var ErrPruneArgs = errors.New("sendintent: prune needs a positive age and batch")
+
+// ErrNoToken: Release needs the reservation token to release.
+var ErrNoToken = errors.New("sendintent: release needs a reservation token")
+
+// ErrNotReserved marks a Reserve error after which the store knows that
+// nothing was reserved: the statement failed before its transaction could
+// commit (sqlstore wraps such errors; the error keeps its retry class). A
+// Reserve error that does not match it is ambiguous — the reservation may
+// have committed and only its reply been lost — and send-email recovers it
+// by its token (Get, then Releaser).
+var ErrNotReserved = errors.New("sendintent: nothing was reserved")
+
 var (
 	// ErrDuplicateRequest matches a *DuplicateRequestError.
 	ErrDuplicateRequest = errors.New("connectors: duplicate send request")

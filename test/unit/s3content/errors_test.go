@@ -75,3 +75,31 @@ func TestDelete_Failure(t *testing.T) {
 	missing := &scriptedS3{deleteErr: &types.NoSuchKey{Message: aws.String("gone")}}
 	assert.NoError(t, s3content.New(missing, "docs").Delete(context.Background(), "docs", "t/a"), "a missing object is already deleted")
 }
+
+// Check writes and deletes a probe object under the prefix, so a missing
+// s3:PutObject or s3:DeleteObject grant fails at startup.
+func TestCheck_WriteAndDeleteProbe(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	missing := func() *scriptedS3 {
+		return &scriptedS3{getErr: &types.NoSuchKey{Message: aws.String("missing")}}
+	}
+
+	ok := missing()
+	require.NoError(t, s3content.New(ok, "docs").Check(ctx, "docrefs/"))
+	require.NotNil(t, ok.putIn, "a probe object is written")
+	assert.True(t, strings.HasPrefix(aws.ToString(ok.putIn.Key), "docrefs/.docref-check/"))
+	assert.Equal(t, int64(0), aws.ToInt64(ok.putIn.ContentLength))
+
+	noPut := missing()
+	noPut.putErr = accessDenied{}
+	err := s3content.New(noPut, "docs").Check(ctx, "docrefs/")
+	require.ErrorIs(t, err, accessDenied{})
+	assert.Contains(t, err.Error(), "s3:PutObject")
+
+	noDelete := missing()
+	noDelete.deleteErr = accessDenied{}
+	err = s3content.New(noDelete, "docs").Check(ctx, "docrefs/")
+	require.ErrorIs(t, err, accessDenied{})
+	assert.Contains(t, err.Error(), "s3:DeleteObject")
+}

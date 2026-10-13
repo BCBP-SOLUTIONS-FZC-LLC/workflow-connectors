@@ -1,0 +1,2 @@
+-- Nothing to undo: a validated constraint cannot be made NOT VALID again,
+-- and 000003's down migration drops it.

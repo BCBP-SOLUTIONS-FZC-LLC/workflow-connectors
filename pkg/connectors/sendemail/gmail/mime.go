@@ -36,10 +36,7 @@ func buildRawMIME(msg sendemail.EmailMessage) []byte {
 	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	fmt.Fprintf(&buf, "MIME-Version: 1.0\r\n")
 
-	bodyContentType := stripCRLF(msg.ContentType)
-	if bodyContentType == "" {
-		bodyContentType = "text/plain"
-	}
+	bodyContentType := bodyMediaType(msg.ContentType)
 
 	if len(msg.Attachments) == 0 {
 		fmt.Fprintf(&buf, "Content-Type: %s; charset=UTF-8\r\n", bodyContentType)
@@ -58,10 +55,7 @@ func buildRawMIME(msg sendemail.EmailMessage) []byte {
 	_ = writeQuotedPrintable(bodyPart, msg.Body)
 
 	for _, a := range msg.Attachments {
-		contentType := a.ContentType
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
+		contentType := attachmentMediaType(a.ContentType)
 		attachmentPart, _ := writer.CreatePart(textproto.MIMEHeader{
 			"Content-Type":              {contentType},
 			"Content-Transfer-Encoding": {"base64"},
@@ -72,6 +66,30 @@ func buildRawMIME(msg sendemail.EmailMessage) []byte {
 
 	_ = writer.Close()
 	return buf.Bytes()
+}
+
+// bodyMediaType is the body part's media type: text/html, or else
+// text/plain (the registry's enum; the core rejects anything else).
+func bodyMediaType(contentType string) string {
+	if contentType == "text/html" {
+		return contentType
+	}
+	return "text/plain"
+}
+
+// attachmentMediaType renders a document's stored content type as a
+// Content-Type header value: parsed and re-formatted (parameters quoted as
+// needed), so a stored value cannot inject header text; anything that does
+// not parse is application/octet-stream.
+func attachmentMediaType(contentType string) string {
+	formatted := ""
+	if mediaType, params, err := mime.ParseMediaType(contentType); err == nil {
+		formatted = mime.FormatMediaType(mediaType, params)
+	}
+	if formatted == "" {
+		return "application/octet-stream"
+	}
+	return formatted
 }
 
 // addressHeader renders one address-header value: the bare address, or

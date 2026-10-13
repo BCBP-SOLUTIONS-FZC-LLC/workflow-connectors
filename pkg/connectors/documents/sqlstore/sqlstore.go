@@ -24,7 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/migrate"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2/pkg/pgcommon"
@@ -167,7 +169,10 @@ func (s *Store) Complete(ctx context.Context, docID, attempt string, result docu
 		RETURNING `+columns, docID, attempt, result.ObjectID, result.ContentType, result.SizeBytes)
 }
 
+// Fail stores reason through errorText: at most maxErrorBytes, valid UTF-8,
+// no NUL (a provider error can embed a whole response body).
 func (s *Store) Fail(ctx context.Context, docID, attempt, reason string) (documents.Document, error) {
+	reason = errorText(reason)
 	return s.finish(ctx, attempt, "failed", reason, `
 		UPDATE connector_documents
 		SET state = 'FAILED', version = version + 1, last_error = $3, failed_attempts = failed_attempts + 1,
@@ -323,6 +328,26 @@ func scan(row pgcommon.Row) (documents.Document, error) {
 		d.ClaimedAt = *claimedAt
 	}
 	return d, nil
+}
+
+// maxErrorBytes bounds the error text stored on a row (last_error) and its
+// audit record (error).
+const maxErrorBytes = 1024
+
+// errorText makes reason safe to store: invalid UTF-8 replaced, NUL removed
+// (PostgreSQL text refuses both), and cut at a rune boundary to
+// maxErrorBytes, the cut marked with an ellipsis.
+func errorText(reason string) string {
+	reason = strings.ReplaceAll(strings.ToValidUTF8(reason, "\uFFFD"), "\x00", "")
+	if len(reason) <= maxErrorBytes {
+		return reason
+	}
+	const ellipsis = "…"
+	cut := maxErrorBytes - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut] + ellipsis
 }
 
 func nullTime(t time.Time) *time.Time {

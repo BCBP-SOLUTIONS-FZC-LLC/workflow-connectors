@@ -7,9 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/mail"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -111,6 +115,10 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 	}
 
 	provider := shared.StringField(input, "provider")
+	ctor, err := s.constructorFor(provider)
+	if err != nil {
+		return s.finish(ctx, nil, "", err)
+	}
 	templateID := shared.StringField(input, "templateId")
 	body := shared.StringField(input, "body")
 	if templateID == "" && body == "" {
@@ -120,13 +128,14 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 		return s.finish(ctx, nil, "", fmt.Errorf("%w: body is required for provider %q (no server-side template mechanism)", shared.ErrValidation, provider))
 	}
 
-	attachments, err := s.resolveAttachments(ctx, shared.StringSliceField(input, "attachments"))
-	if err != nil {
+	if err := validateBodyContentType(shared.StringField(input, "contentType")); err != nil {
 		return s.finish(ctx, nil, "", err)
 	}
 
 	// Optional duplicate-request protection: reserve the caller's messageKey
-	// before anything is sent.
+	// before anything else is done for the send. A redelivered job for an
+	// intent already accepted is reported as the duplicate it is even when
+	// its attachments have since expired, and nothing is downloaded again.
 	intent, duplicate, err := s.reserveIntent(ctx, input)
 	if duplicate != nil {
 		return duplicateResult(*duplicate, shared.StringField(input, "messageKey"))
@@ -135,19 +144,31 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 		return s.finish(ctx, nil, "", err)
 	}
 
-	handle, err := s.clientFor(ctx, provider, input)
+	// From here every failure is recorded on the intent (not_delivered for
+	// a validation or document-ref failure: nothing was sent), a panic too.
+	g := &guard{s: s, ctx: ctx, intent: intent, provider: provider}
+	if intent != nil {
+		defer g.recordPanic()
+	}
+
+	attachments, err := s.resolveAttachments(ctx, shared.StringSliceField(input, "attachments"))
+	if err != nil {
+		return g.finish("", err)
+	}
+
+	handle, err := s.clientFor(ctx, provider, ctor, input)
 	if err != nil {
 		if !errors.Is(err, shared.ErrValidation) {
 			// The client could not be built: nothing was sent.
 			err = NotDelivered(provider, 0, err)
 		}
-		return s.finish(ctx, intent, "", err)
+		return g.finish("", err)
 	}
 	defer handle.Release()
 	client := handle.Client()
 
 	if err := checkProviderAttachmentLimit(provider, client, attachments); err != nil {
-		return s.finish(ctx, intent, "", err)
+		return g.finish("", err)
 	}
 
 	msg := EmailMessage{
@@ -164,13 +185,84 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 
 	if err := ctx.Err(); err != nil {
 		// Cancelled before the send started: nothing reached the provider.
-		return s.finish(ctx, intent, "", NotDelivered(provider, 0, err))
+		return g.finish("", NotDelivered(provider, 0, err))
 	}
+	g.sendStarted = true
 	messageID, err := client.Send(ctx, msg)
 	if err != nil {
-		return s.finish(ctx, intent, "", classifySend(provider, err))
+		return g.finish("", classifySend(provider, err))
 	}
-	return s.finish(ctx, intent, messageID, nil)
+	return g.finish(messageID, nil)
+}
+
+// guard finishes a call that reserved an intent, and records its outcome if
+// the call panics instead: a panic is a bug and is re-raised, never hidden,
+// but the intent must not be left pending (it would refuse every retry
+// with the same messageKey as a duplicate for StalePendingAfter).
+type guard struct {
+	s        *Connector
+	ctx      context.Context
+	intent   *sendintent.Intent
+	provider string
+	// sendStarted: the provider client was called, so it may have handed the
+	// message over before panicking.
+	sendStarted bool
+	// finished: finish was called; a panic in it, or after it, is not
+	// recorded again.
+	finished bool
+}
+
+func (g *guard) finish(messageID string, sendErr error) (map[string]any, error) {
+	g.finished = true
+	return g.s.finish(g.ctx, g.intent, messageID, sendErr)
+}
+
+// recordPanic is deferred by Execute once an intent is reserved: a panic
+// before the send (resolving attachments, building the client) sent nothing
+// and records not_delivered; a panic in or after the provider call records
+// unknown. The panic is then re-raised.
+func (g *guard) recordPanic() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if !g.finished {
+		g.finished = true
+		if g.sendStarted {
+			_, _ = g.s.finish(g.ctx, g.intent, "", Unknown(g.provider, 0, fmt.Errorf("provider client panicked: %v", r)))
+		} else {
+			_, _ = g.s.finish(g.ctx, g.intent, "", NotDelivered(g.provider, 0, fmt.Errorf("panicked before the send: %v", r)))
+		}
+	}
+	panic(r)
+}
+
+// bodyContentTypes is the registry's contentType enum; empty is text/plain.
+var bodyContentTypes = map[string]bool{"": true, "text/plain": true, "text/html": true}
+
+// validateBodyContentType enforces the registry's enum for the body's
+// contentType: the value reaches a MIME header (Gmail) or selects the body
+// kind (SES, Graph), so nothing else is passed on.
+func validateBodyContentType(contentType string) error {
+	if !bodyContentTypes[contentType] {
+		return fmt.Errorf("%w: contentType must be text/plain or text/html", shared.ErrValidation)
+	}
+	return nil
+}
+
+// maxMessageKeyBytes bounds a messageKey, which is stored and indexed.
+const maxMessageKeyBytes = 512
+
+// validateMessageKey requires valid UTF-8 without control characters (NUL
+// cannot be stored in a PostgreSQL text column) of at most 512 bytes.
+func validateMessageKey(messageKey string) error {
+	if len(messageKey) > maxMessageKeyBytes {
+		return fmt.Errorf("%w: messageKey must be at most %d bytes", shared.ErrValidation, maxMessageKeyBytes)
+	}
+	if !utf8.ValidString(messageKey) || strings.IndexFunc(messageKey, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%w: messageKey must be valid UTF-8 without control characters", shared.ErrValidation)
+	}
+	return nil
 }
 
 // checkProviderAttachmentLimit enforces the provider's own attachment limit
@@ -200,12 +292,15 @@ func (s *Connector) reserveIntent(ctx context.Context, input map[string]any) (in
 	if messageKey == "" {
 		return nil, nil, nil
 	}
-	if s.intents == nil {
-		return nil, nil, fmt.Errorf("%w: messageKey needs a send-intent store (sendemail.WithSendIntents / connectors.Config.SendIntents)", shared.ErrValidation)
+	if err := validateMessageKey(messageKey); err != nil {
+		return nil, nil, err
 	}
 	resendFrom, err := resendAttempt(input)
 	if err != nil {
 		return nil, nil, err
+	}
+	if s.intents == nil {
+		return nil, nil, fmt.Errorf("%w: messageKey needs a send-intent store (sendemail.WithSendIntents / connectors.Config.SendIntents)", shared.ErrValidation)
 	}
 	tenant, ok := shared.TenantFromContext(ctx)
 	if !ok {
@@ -214,11 +309,28 @@ func (s *Connector) reserveIntent(ctx context.Context, input map[string]any) (in
 	token := uuid.NewString()
 	in, reserved, err := s.intents.Reserve(ctx, tenant, messageKey, resendFrom, token)
 	if err != nil {
-		if owned, ok := s.recoverReservation(ctx, tenant, messageKey, token); ok {
-			return &owned, nil, nil
+		if errors.Is(err, sendintent.ErrNotReserved) {
+			// The store knows nothing was reserved: the failure keeps its
+			// class (a transient one may be retried).
+			return nil, nil, NotDelivered("send-intent store", 0, err)
 		}
-		// No intent of ours could be confirmed, so nothing is sent.
-		return nil, nil, NotDelivered("send-intent store", 0, err)
+		// Ambiguous: the reservation may have committed and only the reply
+		// been lost.
+		if owned := s.recoverReservation(ctx, tenant, messageKey, token); owned != nil {
+			return owned, nil, nil
+		}
+		// No intent of ours could be confirmed, so nothing is sent. Not
+		// finding it is no proof that it did not commit: the commit may
+		// become visible later (a synchronous standby confirming it), and a
+		// reservation left pending would refuse every retry as a duplicate.
+		// Only a release that changed this call's pending reservation to
+		// not_delivered settles it; then the failure keeps its class.
+		// Otherwise it must not be retried automatically (class unknown):
+		// verify, then resend.
+		if s.releaseReservation(ctx, tenant, messageKey, token) {
+			return nil, nil, NotDelivered("send-intent store", 0, err)
+		}
+		return nil, nil, &SendError{Outcome: OutcomeNotDelivered, Provider: "send-intent store", Err: err, IntentUnrecorded: true}
 	}
 	if !reserved {
 		return nil, &in, nil
@@ -226,18 +338,33 @@ func (s *Connector) reserveIntent(ctx context.Context, input map[string]any) (in
 	return &in, nil, nil
 }
 
-// recoverReservation handles a Reserve whose reply was lost: the statement
+// recoverReservation handles an ambiguous Reserve failure: the statement
 // may have committed. The intent is read back (detached from the call's
-// cancellation, bounded); it is this call's reservation only when it carries
-// this call's token and is still pending.
-func (s *Connector) recoverReservation(ctx context.Context, tenant, messageKey, token string) (sendintent.Intent, bool) {
+// cancellation, bounded); it is this call's reservation only when it
+// carries this call's token and is still pending.
+func (s *Connector) recoverReservation(ctx context.Context, tenant, messageKey, token string) *sendintent.Intent {
 	getCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	in, found, err := s.intents.Get(getCtx, tenant, messageKey)
 	if err != nil || !found || in.ReservationToken != token || in.Status != sendintent.StatusPending {
-		return sendintent.Intent{}, false
+		return nil
 	}
-	return in, true
+	return &in
+}
+
+// releaseReservation releases, best effort, a reservation of this call that
+// may have committed unseen (sendintent.Releaser; detached from the call's
+// cancellation, bounded). It reports whether the store released this call's
+// pending reservation — the only proof that none is left pending.
+func (s *Connector) releaseReservation(ctx context.Context, tenant, messageKey, token string) bool {
+	releaser, ok := s.intents.(sendintent.Releaser)
+	if !ok {
+		return false
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	released, err := releaser.Release(releaseCtx, tenant, messageKey, token)
+	return err == nil && released
 }
 
 // resendAttempt reads the explicit-resend inputs: resend: true must name the
@@ -252,34 +379,40 @@ func resendAttempt(input map[string]any) (int, error) {
 	switch resend := shared.BoolField(input, "resend"); {
 	case resend && attempt < 1:
 		return 0, fmt.Errorf("%w: resend needs resendAttempt: the send intent's current attempts (shown with the duplicate)", shared.ErrValidation)
+	case present && (attempt < 1 || attempt > math.MaxInt32):
+		return 0, fmt.Errorf("%w: resendAttempt must be between 1 and %d", shared.ErrValidation, math.MaxInt32)
 	case !resend && present:
 		return 0, fmt.Errorf("%w: resendAttempt is only valid with resend: true", shared.ErrValidation)
 	case resend:
-		return attempt, nil
+		return int(attempt), nil
 	default:
 		return 0, nil
 	}
 }
 
+// maxExactFloat is the largest magnitude below which every integer is exact
+// in a float64.
+const maxExactFloat = 1 << 53
+
 // intField reads an optional integer input, as a Go integer or a JSON number
 // with no fraction.
-func intField(input map[string]any, key string) (value int, present bool, err error) {
+func intField(input map[string]any, key string) (value int64, present bool, err error) {
 	raw, ok := input[key]
 	if !ok || raw == nil {
 		return 0, false, nil
 	}
 	switch v := raw.(type) {
 	case int:
-		return v, true, nil
+		return int64(v), true, nil
 	case int64:
-		return int(v), true, nil
+		return v, true, nil
 	case float64:
-		if v == float64(int(v)) {
-			return int(v), true, nil
+		if v == math.Trunc(v) && math.Abs(v) <= maxExactFloat {
+			return int64(v), true, nil
 		}
 	case json.Number:
 		if n, convErr := v.Int64(); convErr == nil {
-			return int(n), true, nil
+			return n, true, nil
 		}
 	}
 	return 0, true, fmt.Errorf("%w: %s must be an integer", shared.ErrValidation, key)
@@ -300,7 +433,12 @@ func duplicateResult(in sendintent.Intent, messageKey string) (map[string]any, e
 		"deliveryOutcome": string(intentOutcome(in.Status)),
 	}
 	if in.Status == sendintent.StatusAccepted {
+		// The fields a successful send returns, from the accepted attempt,
+		// so later steps read the same output; sent stays false (nothing was
+		// sent by this request) and duplicate true.
 		out["providerMessageId"] = in.ProviderMessageID
+		out["messageId"] = in.ProviderMessageID
+		out["sentAt"] = in.UpdatedAt.UTC()
 		return out, nil
 	}
 	return out, &sendintent.DuplicateRequestError{IntentID: in.ID, MessageKey: messageKey, Status: in.Status, Attempts: in.Attempts}
@@ -337,6 +475,11 @@ func (s *Connector) finish(ctx context.Context, intent *sendintent.Intent, messa
 		outcome = OutcomeNotDelivered
 	}
 	out["deliveryOutcome"] = string(outcome)
+	// A provider message ID can hold anything (NUL, invalid UTF-8): the
+	// worker stores the output as jsonb, which refuses \u0000. It is made
+	// storable once, so the output and the intent carry the same value (a
+	// duplicate of an accepted intent returns the recorded one).
+	messageID = recordable(messageID)
 	if sendErr == nil {
 		out["messageId"] = messageID
 		out["sentAt"] = time.Now().UTC()
@@ -348,6 +491,10 @@ func (s *Connector) finish(ctx context.Context, intent *sendintent.Intent, messa
 		if sendErr != nil {
 			detail = sendErr.Error()
 		}
+		// Provider error text can hold anything (a response cut mid-rune,
+		// a NUL): PostgreSQL text refuses both, and a refused write would
+		// leave the intent pending.
+		detail = recordable(detail)
 		// Detached from the call's cancellation (the outcome must be kept even
 		// if the caller gave up) but bounded: a stuck database must not hold
 		// the call after the provider already accepted the message.
@@ -369,6 +516,23 @@ func (s *Connector) finish(ctx context.Context, intent *sendintent.Intent, messa
 	return out, sendErr
 }
 
+// maxRecordedBytes caps the text recorded on a send intent.
+const maxRecordedBytes = 4 << 10
+
+// recordable makes s storable as PostgreSQL text: valid UTF-8, no NUL, at
+// most maxRecordedBytes (cut on a rune boundary).
+func recordable(s string) string {
+	s = strings.ReplaceAll(strings.ToValidUTF8(s, "\uFFFD"), "\x00", "")
+	if len(s) <= maxRecordedBytes {
+		return s
+	}
+	cut := maxRecordedBytes
+	for !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 func intentOutput(intent *sendintent.Intent, out map[string]any) map[string]any {
 	if intent != nil {
 		out["sendIntentId"] = intent.ID
@@ -376,19 +540,24 @@ func intentOutput(intent *sendintent.Intent, out map[string]any) map[string]any 
 	return out
 }
 
-// clientFor returns a handle on the provider client for this call's
-// credentials and sender. The caller must Release it when the call is
-// finished; a reset of the cache never closes a client while a handle is out.
-func (s *Connector) clientFor(ctx context.Context, provider string, input map[string]any) (*shared.ClientHandle[ProviderClient], error) {
+// constructorFor returns the configured constructor for provider. Execute
+// calls it with the other input checks, before any intent is reserved, so a
+// missing or unconfigured provider never creates a send intent.
+func (s *Connector) constructorFor(provider string) (ProviderConstructor, error) {
 	if provider == "" {
 		return nil, fmt.Errorf("%w: provider is required", shared.ErrValidation)
 	}
-
 	ctor, ok := s.providers[provider]
 	if !ok {
 		return nil, fmt.Errorf("%w: provider %q is not configured", shared.ErrValidation, provider)
 	}
+	return ctor, nil
+}
 
+// clientFor returns a handle on the provider client for this call's
+// credentials and sender. The caller must Release it when the call is
+// finished; a reset of the cache never closes a client while a handle is out.
+func (s *Connector) clientFor(ctx context.Context, provider string, ctor ProviderConstructor, input map[string]any) (*shared.ClientHandle[ProviderClient], error) {
 	return s.clients.Acquire(emailCacheKey(provider, input), func() (ProviderClient, error) {
 		client, err := ctor(ctx, input)
 		if err != nil {

@@ -6,7 +6,7 @@ func storageDefinition() Definition {
 		DisplayName: "Storage (fetch / upload / delete)",
 		Description: "Fetch, upload, or delete a document in the tenant's object store or Google Drive folder.",
 		Inputs: []Field{
-			{Name: "provider", Kind: FieldKindEnum, EnumValues: []string{"aws-s3", "azure-blob", "gcp-gcs", "google-drive"}, Description: "Backend provider for this call. Required — no default."},
+			{Name: "provider", Kind: FieldKindEnum, Required: true, EnumValues: []string{"aws-s3", "azure-blob", "gcp-gcs", "google-drive"}, Description: "Backend provider for this call. Required — no default."},
 			{Name: "accessKey", Kind: FieldKindSecretRef, Condition: "required for aws-s3", Description: "Tenant-stored provider credential, read from its OpenBao path by the worker."},
 			{Name: "secretKey", Kind: FieldKindSecretRef, Condition: "required for aws-s3", Description: "Tenant-stored provider credential, read from its OpenBao path by the worker."},
 			{Name: "region", Kind: FieldKindString, Condition: "required for aws-s3", Description: "The bucket's AWS region. Never taken from the worker's own environment."},
@@ -39,9 +39,9 @@ func sendEmailDefinition() Definition {
 	return Definition{
 		Type:        TypeSendEmail,
 		DisplayName: "Send Email",
-		Description: "Send an email via the configured provider. Not idempotent: at-most-once when not retried, effectively at-least-once when retried after an uncertain outcome. Exactly-once delivery is not provided. A failed send is retried automatically only when the provider provably never accepted it and the failure is transient (DNS, connection refused, 429); a send whose outcome is unknown is never retried automatically. Attachment limits (total raw bytes): sendgrid 20 MiB, aws-ses 25 MiB, microsoft-365 3 MiB (inline sendMail), google-workspace 25 MiB.",
+		Description: "Send an email via the configured provider. Not idempotent: at-most-once when not retried, effectively at-least-once when retried after an uncertain outcome. Exactly-once delivery is not provided. A failed send is retried automatically only when the provider provably never accepted it and the failure is transient (DNS, connection refused, 429); a send whose outcome is unknown is never retried automatically. Attachment limits (total raw bytes): sendgrid 20 MiB, aws-ses 25 MiB, microsoft-365 2,900,000 bytes (inline sendMail; the whole request must also stay under 4,000,000 bytes), google-workspace 25 MiB.",
 		Inputs: []Field{
-			{Name: "provider", Kind: FieldKindEnum, EnumValues: []string{"sendgrid", "aws-ses", "microsoft-365", "google-workspace"}, Description: "Backend provider for this call. Required — no default."},
+			{Name: "provider", Kind: FieldKindEnum, Required: true, EnumValues: []string{"sendgrid", "aws-ses", "microsoft-365", "google-workspace"}, Description: "Backend provider for this call. Required — no default."},
 			{Name: "apiKey", Kind: FieldKindSecretRef, Condition: "required for sendgrid", Description: "Tenant-stored provider credential, read from its OpenBao path by the worker."},
 			{Name: "accessKey", Kind: FieldKindSecretRef, Condition: "required for aws-ses", Description: "Tenant-stored provider credential, read from its OpenBao path by the worker."},
 			{Name: "secretKey", Kind: FieldKindSecretRef, Condition: "required for aws-ses", Description: "Tenant-stored provider credential, read from its OpenBao path by the worker."},
@@ -55,9 +55,9 @@ func sendEmailDefinition() Definition {
 			{Name: "receiverName", Kind: FieldKindString},
 			{Name: "receiverEmail", Kind: FieldKindString, Required: true, Description: "Typically sourced from workflow-instance data."},
 			{Name: "subject", Kind: FieldKindString},
-			{Name: "contentType", Kind: FieldKindEnum, EnumValues: []string{"text/plain", "text/html"}},
+			{Name: "contentType", Kind: FieldKindEnum, EnumValues: []string{"text/plain", "text/html"}, Description: "The body's MIME type; any other value is a validation error. Defaults to text/plain."},
 			{Name: "body", Kind: FieldKindString, Condition: "required for microsoft-365/google-workspace"},
-			{Name: "attachments", Kind: FieldKindList, Description: "List of document refs (from storage); each must belong to the same tenant and be unexpired. Total raw size at most 25 MiB, and at most the provider's own limit: sendgrid 20 MiB, microsoft-365 3 MiB; larger is a permanent validation failure (not_delivered)."},
+			{Name: "attachments", Kind: FieldKindList, Description: "List of document refs (from storage); each must belong to the same tenant and be unexpired. Total raw size at most 25 MiB, and at most the provider's own limit: sendgrid 20 MiB, microsoft-365 2,900,000 bytes (inline sendMail; the whole request must also stay under 4,000,000 bytes); larger is a permanent validation failure (not_delivered)."},
 			{Name: "messageKey", Kind: FieldKindString, Description: "Optional business-level message identifier. With a send-intent store configured, a second request with the same key is rejected before anything is sent. Duplicate-request protection only — not idempotency: it cannot prevent a provider-level duplicate after an uncertain outcome."},
 			{Name: "resend", Kind: FieldKindBool, Condition: "only with messageKey; requires resendAttempt", Description: "Explicit opt-in to send again for a messageKey that already has an intent. If the earlier outcome was accepted or unknown, the recipient may get the email twice."},
 			{Name: "resendAttempt", Kind: FieldKindInt, Condition: "required with resend", Description: "The attempt being resent: the intent's current attempts, as shown in the duplicate output (attempts) and error. The resend proceeds only while that attempt is current and finished (not pending, unless pending unchanged for 15 minutes: the worker stopped mid-send), so a redelivered resend request is a duplicate and never sends again."},
@@ -65,8 +65,8 @@ func sendEmailDefinition() Definition {
 		},
 		Outputs: []Field{
 			{Name: "sent", Kind: FieldKindBool},
-			{Name: "messageId", Kind: FieldKindString},
-			{Name: "sentAt", Kind: FieldKindTimestamp},
+			{Name: "messageId", Kind: FieldKindString, Description: "The provider's message ID. On a duplicate of an accepted intent, the one recorded when it was accepted."},
+			{Name: "sentAt", Kind: FieldKindTimestamp, Description: "When the provider accepted the message. On a duplicate of an accepted intent, when that intent was recorded as accepted."},
 			{Name: "deliveryOutcome", Kind: FieldKindEnum, EnumValues: []string{"accepted", "not_delivered", "unknown"}, Description: "accepted: the provider accepted the message. not_delivered: it definitively did not. unknown: it may have — verify delivery before any resend, which may duplicate the email. Returned with every result, failures included (a failure before sending is not_delivered); on a duplicate it is the existing intent's outcome (pending reports unknown)."},
 			{Name: "sendIntentId", Kind: FieldKindString, Condition: "with messageKey", Description: "The send intent recorded for this request."},
 			{Name: "sendIntentWarning", Kind: FieldKindString, Condition: "with messageKey, when the outcome could not be recorded", Description: "The send intent stays pending: treat the delivery as unknown and verify it before any resend."},
@@ -92,15 +92,22 @@ func restCallDefinition() Definition {
 		},
 		Outputs: []Field{
 			{Name: "status", Kind: FieldKindInt},
+			{Name: "method", Kind: FieldKindString, Description: "The HTTP method sent (the alias's method, upper-case). Returned with every result once the request was sent, failures included, so a retry decision (connectors.DecideRetry) needs no second alias lookup."},
 			{Name: "headers", Kind: FieldKindMap},
 			{Name: "body", Kind: FieldKindAny, Description: "JSON-decoded when the response Content-Type contains \"json\", with numbers kept as exact decimal text (json.Number, so integers beyond 2^53 lose no digits); otherwise a string."},
-			{Name: "bodyTruncated", Kind: FieldKindBool, Description: "Set (true) only on a status >= 300 whose body was over the 10 MiB response cap or cut off: body is then its first 10 MiB, or what arrived, as a string."},
+			{Name: "bodyTruncated", Kind: FieldKindBool, Description: "Set (true) only when the body was over the 10 MiB response cap, or (status >= 300) cut off: body is then its first 10 MiB, or what arrived, as a string. A 2xx over the cap fails permanently with reason \"response too large\" (not invalid input: the service processed the call), with status and headers still returned."},
 		},
 		Retry: RetryPolicyConditional,
 	}
 }
 
-func chatNotifyDefinition() Definition {
+// ChatNotifyDefinition is chat-notify's definition. It is not listed in All()
+// — chat-notify cannot be authored yet: no provider adapter exists, its
+// ProviderClient port takes no per-call credential (authToken), and
+// messageBlock is not supported — but connectors.New still builds the
+// connector, and Lookup returns this definition so DecideRetry applies its
+// unsafe policy.
+func ChatNotifyDefinition() Definition {
 	return Definition{
 		Type:        TypeChatNotify,
 		DisplayName: "Chat Notify (Slack/Teams)",

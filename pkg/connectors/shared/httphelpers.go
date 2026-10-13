@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -79,7 +80,10 @@ func RenderPathTemplate(tmpl string, params map[string]any) (string, error) {
 			if !ok {
 				return "", fmt.Errorf("%w: missing path param %q", ErrValidation, name)
 			}
-			formatted := FormatParam(val)
+			formatted, err := FormatScalarParam(val)
+			if err != nil {
+				return "", fmt.Errorf("%w (path param %q)", err, name)
+			}
 			if inQuery {
 				b.WriteString(url.QueryEscape(formatted))
 			} else {
@@ -134,19 +138,45 @@ func joinInternalURL(baseURL, path string) (string, error) {
 
 // ApplyQueryParams adds params to req's query. A key the alias's path
 // template already sets is ErrValidation: a caller's parameter never
-// overrides one the alias fixed.
+// overrides one the alias fixed. The alias's own query is kept byte for byte
+// (order, valueless flags such as "?verbose" and its escaping): the caller's
+// parameters, sorted by key and query-escaped, are appended after it. A
+// value that is not a scalar (see FormatScalarParam) is ErrValidation, as is
+// an alias query url.ParseQuery rejects (a ";" in it, an invalid escape).
 func ApplyQueryParams(req *http.Request, params map[string]any) error {
 	if len(params) == 0 {
 		return nil
 	}
-	q := req.URL.Query()
-	for k, v := range params {
-		if q.Has(k) {
+	// url.ParseQuery, not URL.Query: Query silently drops a pair it cannot
+	// parse (one containing ";"), so a key the alias fixed after it would go
+	// unnoticed and be sent twice.
+	fixed, err := url.ParseQuery(req.URL.RawQuery)
+	if err != nil {
+		return fmt.Errorf("%w: the alias's query %q cannot be parsed: %w", ErrValidation, req.URL.RawQuery, err)
+	}
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		if fixed.Has(k) {
 			return fmt.Errorf("%w: query param %q is fixed by the alias's path template", ErrValidation, k)
 		}
-		q.Set(k, FormatParam(v))
+		keys = append(keys, k)
 	}
-	req.URL.RawQuery = q.Encode()
+	slices.Sort(keys)
+	var b strings.Builder
+	b.WriteString(req.URL.RawQuery)
+	for _, k := range keys {
+		v, err := FormatScalarParam(params[k])
+		if err != nil {
+			return fmt.Errorf("%w (query param %q)", err, k)
+		}
+		if b.Len() > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(url.QueryEscape(k))
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(v))
+	}
+	req.URL.RawQuery = b.String()
 	return nil
 }
 
@@ -226,6 +256,10 @@ func DecodeJSON(raw []byte, v any) error {
 // (how encoding/json decodes numbers elsewhere) would print 1234567 as
 // "1.234567e+06" with fmt.Sprint; whole numbers are printed as integers and
 // others without an exponent.
+//
+// Deprecated: FormatParam renders any other value with fmt.Sprint, so a
+// list, map or nil becomes "[a b]", "map[...]" or "<nil>". Use
+// FormatScalarParam, which rejects them.
 func FormatParam(v any) string {
 	switch n := v.(type) {
 	case float64:
@@ -236,6 +270,20 @@ func FormatParam(v any) string {
 		return n.String()
 	default:
 		return fmt.Sprint(v)
+	}
+}
+
+// FormatScalarParam renders a path or query parameter as FormatParam does,
+// accepting only a scalar: a string, bool, json.Number, or a Go integer or
+// floating-point number. Anything else — nil, a list, a map, a struct — is
+// ErrValidation: it has no single, unambiguous text form.
+func FormatScalarParam(v any) (string, error) {
+	switch v.(type) {
+	case string, bool, json.Number, float64, float32,
+		int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return FormatParam(v), nil
+	default:
+		return "", fmt.Errorf("%w: parameter value must be a string, number or bool, got %T", ErrValidation, v)
 	}
 }
 

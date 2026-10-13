@@ -35,9 +35,14 @@ func WithKeyPrefix(prefix string) ServiceOption {
 	return func(s *Service) { s.keyPrefix = prefix }
 }
 
-// cleanupTimeout bounds the best-effort removal of an object whose reference
-// could not be stored.
-const cleanupTimeout = 10 * time.Second
+// maxPrealloc bounds the buffer Read allocates up front from a ref's recorded
+// size.
+const maxPrealloc = 64 << 20
+
+// cleanupTimeout bounds each step of the best-effort cleanup after a failed
+// reference write — the reference delete and the object delete get one
+// each, so a stalled metadata store cannot use up the object delete's time.
+const cleanupTimeout = 5 * time.Second
 
 func NewService(refs Store, content ContentStore, opts ...ServiceOption) *Service {
 	s := &Service{refs: refs, content: content}
@@ -70,8 +75,11 @@ func validTenant(tenantID string) error {
 
 // Create writes content to S3, then persists the reference metadata, and
 // returns the ref. The object is written first, so a returned ref always
-// points at an existing object. If the metadata write fails the object is
-// removed (best effort; the bucket lifecycle rule removes any leftover).
+// points at an existing object. If the metadata write fails, or its outcome
+// is unknown (a lost reply, a write not confirmed durable), both the
+// reference and the object are removed, best effort: a reference the store
+// did keep must not outlive the call that reported failure, and the bucket
+// lifecycle rule removes any object left over.
 func (s *Service) Create(ctx context.Context, tenantID, contentType string, content []byte) (Ref, error) {
 	if err := validTenant(tenantID); err != nil {
 		return Ref{}, err
@@ -92,9 +100,16 @@ func (s *Service) Create(ctx context.Context, tenantID, contentType string, cont
 	})
 	if err != nil {
 		// Detached from the caller's cancellation but still bounded, so a
-		// stalled S3 connection cannot hold the task after its deadline.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-		_ = s.content.Delete(cleanupCtx, s.content.Bucket(), key)
+		// stalled store cannot hold the task after its deadline. The
+		// reference goes first (deleting a missing one is harmless): a
+		// metadata write that landed despite the error must not leave a
+		// resolvable ref pointing at a deleted object.
+		detached := context.WithoutCancel(ctx)
+		refCtx, cancel := context.WithTimeout(detached, cleanupTimeout)
+		_ = s.refs.Delete(refCtx, tenantID, id)
+		cancel()
+		objCtx, cancel := context.WithTimeout(detached, cleanupTimeout)
+		_ = s.content.Delete(objCtx, s.content.Bucket(), key)
 		cancel()
 		return Ref{}, fmt.Errorf("docref: store reference: %w", err)
 	}
@@ -199,8 +214,10 @@ func (s *Service) Read(ctx context.Context, tenantID, id string, maxBytes int64)
 		return Ref{}, nil, err
 	}
 	defer func() { _ = body.Close() }()
+	// The recorded size is untrusted until the content verifies: preallocate
+	// at most maxPrealloc, and let the buffer grow from there.
 	var buf bytes.Buffer
-	buf.Grow(int(ref.Size) + bytes.MinRead)
+	buf.Grow(int(min(ref.Size, maxPrealloc)) + bytes.MinRead)
 	if _, err := buf.ReadFrom(body); err != nil {
 		return Ref{}, nil, err
 	}
@@ -210,9 +227,26 @@ func (s *Service) Read(ctx context.Context, tenantID, id string, maxBytes int64)
 // Delete removes the reference, then its object. Once the reference is gone
 // nothing resolves it; if the object delete fails the bucket lifecycle rule
 // removes it later.
+//
+// A reference that fails its integrity checks (ErrIntegrityViolation: a
+// corrupt record, or one pointing at an object other than its own) is still
+// deleted — the store's delete is tenant-guarded — but the object the record
+// names is not: the record cannot be trusted to name an object this
+// reference owns. The reference's own object — the canonical key derived
+// from tenantID and id in this service's bucket, never from the record — is
+// deleted instead, best effort (a missing object is fine; a failure leaves
+// it to the bucket lifecycle rule). Delete then returns nil, as the
+// reference no longer resolves.
 func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
 	ref, err := s.Lookup(ctx, tenantID, id)
 	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if errors.Is(err, ErrIntegrityViolation) {
+		if err := s.refs.Delete(ctx, tenantID, id); err != nil {
+			return fmt.Errorf("docref: delete reference: %w", err)
+		}
+		_ = s.content.Delete(ctx, s.content.Bucket(), s.objectKey(tenantID, id))
 		return nil
 	}
 	if err != nil {

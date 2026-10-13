@@ -212,6 +212,30 @@ func (f *fakeDriveFilesAPI) placeFile(folder, name, documentID string, content [
 	return file.id
 }
 
+// placeTyped adds an untagged item with a MIME type, as if made in the
+// folder outside the connector: a folder, a shortcut, a Google Doc. Like the
+// rest of the fake it ignores Drive's query, so the adapter's own MIME check
+// is what keeps such an item out.
+func (f *fakeDriveFilesAPI) placeTyped(folder, name, mimeType string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	file := &fakeDriveFile{id: uuid.NewString(), folder: folder, name: name, contentType: mimeType, content: []byte("drive item")}
+	f.files = append(f.files, file)
+	return file.id
+}
+
+// mimeOf returns the MIME type of the file with id, "" when it is gone.
+func (f *fakeDriveFilesAPI) mimeOf(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, file := range f.files {
+		if file.id == id {
+			return file.contentType
+		}
+	}
+	return ""
+}
+
 var _ driveFilesAPI = (*fakeDriveFilesAPI)(nil)
 
 // storeCase is one documents.Store the scenarios run against.

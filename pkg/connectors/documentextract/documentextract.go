@@ -1,3 +1,12 @@
+// Package documentextract is the document-extract connector core (form,
+// signature, layout and query analysis of a document).
+//
+// EXPERIMENTAL — not for production. It is not built by connectors.New nor
+// listed in registry.All(), and its API may change in any release. Known
+// gaps: it has no tenant scoping (no connectors.WithTenant check), and an
+// inline documentRef is passed to the provider as given — it is not resolved
+// or verified through docref.Service (tenant, size and SHA-256 checks), so
+// it could name another tenant's document.
 package documentextract
 
 import (

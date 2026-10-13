@@ -130,3 +130,77 @@ sqlQuery:
 		})
 	}
 }
+
+// A misspelt or unknown key is an error, never a silently empty field.
+func TestLoad_UnknownKeyIsRejected(t *testing.T) {
+	t.Parallel()
+
+	for name, content := range map[string]string{
+		"misspelt entry key": `
+restCall:
+  - alias: a
+    method: GET
+    baseURL: http://svc.internal
+    pathTemplte: /a
+`,
+		"unknown top-level key": `
+version: 1
+restCalls: []
+`,
+	} {
+		_, err := aliasconfig.Load(writeTemp(t, content))
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "not found in type", name)
+	}
+}
+
+func TestLoad_SingleDocumentOnly(t *testing.T) {
+	t.Parallel()
+
+	_, err := aliasconfig.Load(writeTemp(t, "version: 1\n---\nversion: 2\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "single YAML document")
+}
+
+// A trailing "---" (an empty document, optionally with comments) is common in
+// generated or concatenated YAML; it must not stop the worker from starting.
+func TestLoad_TrailingEmptyDocumentsAreIgnored(t *testing.T) {
+	t.Parallel()
+
+	for name, content := range map[string]string{
+		"trailing ---":              "version: 1\n---\n",
+		"trailing --- no newline":   "version: 1\n---",
+		"trailing --- with comment": "version: 1\n--- # end\n# nothing more\n",
+		"several empty documents":   "version: 1\n---\n---\n...\n",
+	} {
+		cfg, err := aliasconfig.Load(writeTemp(t, content))
+		require.NoError(t, err, name)
+		assert.Equal(t, 1, cfg.Version, name)
+	}
+}
+
+func TestLoad_SecondDocumentWithContentIsRejected(t *testing.T) {
+	t.Parallel()
+
+	for name, content := range map[string]string{
+		"mapping":            "version: 1\n---\nrestCall: []\n",
+		"explicit null":      "version: 1\n---\nnull\n",
+		"scalar":             "version: 1\n---\nhello\n",
+		"after empty doc":    "version: 1\n---\n---\nversion: 2\n",
+		"malformed document": "version: 1\n---\n[unclosed\n",
+	} {
+		_, err := aliasconfig.Load(writeTemp(t, content))
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "single YAML document", name)
+	}
+}
+
+func TestLoad_EmptyFileIsEmptyConfig(t *testing.T) {
+	t.Parallel()
+
+	for _, content := range []string{"", "# only a comment\n"} {
+		cfg, err := aliasconfig.Load(writeTemp(t, content))
+		require.NoError(t, err)
+		assert.Equal(t, aliasconfig.Config{}, cfg)
+	}
+}

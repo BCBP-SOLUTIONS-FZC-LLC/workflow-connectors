@@ -53,12 +53,17 @@ func (d RetryDecision) LogAttrs() []slog.Attr {
 //     when the provider provably never accepted the message (ErrNotDelivered),
 //     so a retry cannot duplicate it; unsafe (chat-notify) → never.
 //
+// For rest-call, pass the "method" field of Execute's output: it is set on
+// every result once the request was sent, failures included. The policy comes
+// from registry.Lookup, so chat-notify — built by New but not in
+// registry.All() — keeps its unsafe policy.
+//
 // A retried call still needs a bounded number of attempts with backoff —
 // the worker's retry policy — since a transient failure can persist.
 func DecideRetry(connectorType string, err error, method string) RetryDecision {
 	class, reason := shared.ClassOf(err)
 	d := RetryDecision{Class: class, Reason: reason}
-	def, known := registry.All()[connectorType]
+	def, known := registry.Lookup(connectorType)
 	if !known {
 		d.Rule = "unknown connector type"
 		return d

@@ -119,6 +119,9 @@ func TestSendEmail_LostReservationReply_NotOursIsNotDelivered(t *testing.T) {
 		assert.ErrorIs(t, err, shared.ErrNotDelivered, name)
 		assert.ErrorIs(t, err, errLostReply, name)
 		assert.Equal(t, "not_delivered", out["deliveryOutcome"], name)
+		// Nothing was released (no Releaser here): the reservation may
+		// surface pending later, so no automatic retry.
+		assert.False(t, autoRetryAllowed(err), name)
 		assert.NotContains(t, out, "sendIntentId", name)
 		assert.Empty(t, client.Sent(), name)
 	}

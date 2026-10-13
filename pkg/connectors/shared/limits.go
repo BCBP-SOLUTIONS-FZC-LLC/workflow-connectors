@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"time"
@@ -28,9 +29,17 @@ const (
 	ProviderHTTPTimeout = 2 * time.Minute
 )
 
-// ErrTooLarge matches a payload over its size limit (always together with
-// ErrValidation: retrying cannot help).
+// ErrTooLarge matches a payload over its size limit. Retrying cannot help:
+// it comes with ErrValidation (TooLarge), except for a rest-call or sql-query
+// 2xx response over MaxResponseBytes, which is a permanent upstream failure
+// (ReasonResponseTooLarge) since the service did process the call.
 var ErrTooLarge = errors.New("connectors: payload too large")
+
+// ReasonResponseTooLarge is the ClassOf reason of a successful (2xx) internal
+// call (rest-call, sql-query) whose response body exceeded MaxResponseBytes: a
+// permanent failure wrapping ErrUpstream and ErrTooLarge, but not invalid
+// input (never ErrValidation) — the service did process the request.
+const ReasonResponseTooLarge = "response too large"
 
 // TooLarge reports that what exceeds limit.
 func TooLarge(what string, limit int64) error {
@@ -63,11 +72,18 @@ func ReadAllLimited(r io.Reader, limit int64, what string) ([]byte, error) {
 // reset that does not prove the request was unprocessed (see
 // ProviderHTTPClient), which would repeat a non-idempotent rest-call. With c
 // nil, or c.Transport nil, the transport is a clone of
-// http.DefaultTransport; when c.Transport is an *http.Transport it is cloned
-// (the caller's transport is never modified, and the copy has its own
-// connection pool). Either way the clone is set to HTTP/1.1 only. Any other
+// BaseTransport (http.DefaultTransport's settings) with no proxy; when
+// c.Transport is an *http.Transport it is cloned (the caller's transport is
+// never modified, and the copy has its own connection pool). Either way the
+// clone is set to HTTP/1.1 only. Any other
 // http.RoundTripper (a tracing or metrics wrapper) is used as-is: the caller
 // owns its protocol choice and must not enable HTTP/2 under it.
+//
+// Proxy: the default transport never uses a proxy. http.DefaultTransport's
+// ProxyFromEnvironment would send x-internal-token and x-departments through
+// whatever egress proxy HTTP_PROXY / HTTPS_PROXY name — internal calls go
+// straight to the alias's service. A caller-supplied *http.Transport keeps
+// its own Proxy setting.
 //
 // The nil-client default carries no client-wide timeout: each call is bounded
 // by CallTimeout (its alias's timeout, else DefaultHTTPTimeout), so an alias
@@ -80,12 +96,41 @@ func InternalHTTPClient(c *http.Client) *http.Client {
 	}
 	switch t := out.Transport.(type) {
 	case nil:
-		out.Transport = http1Only(http.DefaultTransport.(*http.Transport))
+		transport := http1Only(BaseTransport())
+		transport.Proxy = nil
+		out.Transport = transport
 	case *http.Transport:
 		out.Transport = http1Only(t)
 	}
 	out.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &out
+}
+
+// BaseTransport returns a new *http.Transport, with its own connection pool,
+// to build a client's transport from: a clone of http.DefaultTransport when
+// it is an *http.Transport, else — when the process replaced it with a
+// wrapper (otelhttp, httpmock) — a transport with Go's default
+// http.DefaultTransport settings. It never panics, and the caller may modify
+// the result freely.
+func BaseTransport() *http.Transport {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return goDefaultTransport()
+}
+
+// goDefaultTransport mirrors the settings of Go's own http.DefaultTransport.
+func goDefaultTransport() *http.Transport {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
 // http1Only returns a clone of t that never negotiates HTTP/2.
@@ -117,7 +162,7 @@ func http1Only(t *http.Transport) *http.Transport {
 // when nothing of it was written.
 func ProviderHTTPClient() *http.Client {
 	return &http.Client{
-		Transport:     http1Only(http.DefaultTransport.(*http.Transport)),
+		Transport:     http1Only(BaseTransport()),
 		Timeout:       ProviderHTTPTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}

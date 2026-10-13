@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/connectors/docref"
@@ -61,6 +63,12 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 	if bucket == "" || key == "" {
 		return nil, fmt.Errorf("%w: bucket and key are required", shared.ErrValidation)
 	}
+	if err := validateName("bucket", bucket); err != nil {
+		return nil, err
+	}
+	if err := validateName("key", key); err != nil {
+		return nil, err
+	}
 
 	handle, err := s.clientFor(ctx, input)
 	if err != nil {
@@ -82,6 +90,28 @@ func (s *Connector) Execute(ctx context.Context, input map[string]any) (map[stri
 	default:
 		return nil, fmt.Errorf("%w: operation must be one of fetch/upload/delete", shared.ErrValidation)
 	}
+}
+
+// maxNameBytes bounds bucket and key: S3's and GCS's object-key limit (Azure
+// allows a little more, Drive a lot more, but none needs more for a workflow).
+const maxNameBytes = 1024
+
+// validateName refuses a bucket or key that no provider accepts, or that is
+// unsafe to store and log: over maxNameBytes, not valid UTF-8, or holding a
+// control character (NUL, CR, LF, DEL, C1). Refused here as invalid input,
+// such a name never reaches a provider or the Drive document registry, where
+// it would fail as an unclassified error.
+func validateName(field, value string) error {
+	if len(value) > maxNameBytes {
+		return fmt.Errorf("%w: %s is %d bytes, over the %d-byte limit", shared.ErrValidation, field, len(value), maxNameBytes)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%w: %s is not valid UTF-8", shared.ErrValidation, field)
+	}
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%w: %s contains a control character", shared.ErrValidation, field)
+	}
+	return nil
 }
 
 // clientFor returns a handle on the provider client for this call's
@@ -180,10 +210,14 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 	if content == "" {
 		return nil, fmt.Errorf("%w: content is required for upload", shared.ErrValidation)
 	}
-	raw := []byte(content)
 	contentType := shared.StringField(input, "contentType")
 	fromRef := docref.IsRef(content)
 
+	// Every size is checked before the content is copied or decoded, so an
+	// oversized input never costs a second buffer of its size: a ref is read
+	// with the object limit, inline text by its length, base64 by its exact
+	// decoded size (the decoder never yields more).
+	var raw []byte
 	if fromRef {
 		tenant, err := s.refTenant(ctx, true)
 		if err != nil {
@@ -202,7 +236,14 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 	} else {
 		switch shared.StringField(input, "contentEncoding") {
 		case "", encodingUTF8:
+			if err := checkUploadSize(int64(len(content))); err != nil {
+				return nil, err
+			}
+			raw = []byte(content)
 		case encodingBase64:
+			if err := checkUploadSize(base64DecodedSize(content)); err != nil {
+				return nil, err
+			}
 			decoded, err := base64.StdEncoding.DecodeString(content)
 			if err != nil {
 				return nil, fmt.Errorf("%w: content is not valid base64: %s", shared.ErrValidation, err)
@@ -211,9 +252,6 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 		default:
 			return nil, fmt.Errorf("%w: contentEncoding must be %q or %q", shared.ErrValidation, encodingUTF8, encodingBase64)
 		}
-	}
-	if int64(len(raw)) > shared.MaxObjectBytes {
-		return nil, fmt.Errorf("%w: upload of %d bytes exceeds the %d-byte limit", shared.ErrValidation, len(raw), shared.MaxObjectBytes)
 	}
 
 	if err := client.Upload(ctx, bucket, key, raw, contentType); err != nil {
@@ -240,6 +278,31 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 		out["contentRef"] = ref.ID
 	}
 	return out, nil
+}
+
+func checkUploadSize(size int64) error {
+	if size > shared.MaxObjectBytes {
+		return fmt.Errorf("%w: upload of %d bytes exceeds the %d-byte limit", shared.ErrValidation, size, shared.MaxObjectBytes)
+	}
+	return nil
+}
+
+// base64DecodedSize is the size s decodes to when it is valid standard
+// base64: line breaks, which the decoder skips anywhere (even between the two
+// '=' of the padding), and padding do not count. An invalid s gets an
+// estimate; the decoder then refuses it.
+func base64DecodedSize(s string) int64 {
+	n := len(s) - strings.Count(s, "\n") - strings.Count(s, "\r")
+	size := int64(base64.StdEncoding.DecodedLen(n))
+	pad := 0
+	for i := len(s) - 1; i >= 0 && pad < 2; i-- {
+		if s[i] == '=' {
+			pad++
+		} else if s[i] != '\r' && s[i] != '\n' {
+			break
+		}
+	}
+	return max(size-int64(pad), 0)
 }
 
 // refTenant returns the tenant a document ref is scoped to, when needed.

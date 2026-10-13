@@ -170,7 +170,7 @@ func TestRealDrive_FindOne(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, &driveFile{ID: "f1", MimeType: "application/pdf", DocumentID: "doc-1"}, f)
 
-	assert.Equal(t, `'fold\'er' in parents and name = 'a.pdf' and trashed = false`, srv.queries[0])
+	assert.Equal(t, `'fold\'er' in parents and name = 'a.pdf' and trashed = false and mimeType != 'application/vnd.google-apps.folder' and mimeType != 'application/vnd.google-apps.shortcut'`, srv.queries[0])
 	assert.Equal(t, `'folder' in parents and appProperties has { key='connectorDocumentId' and value='doc-1' } and trashed = false`, srv.queries[2])
 
 	// A Drive error is returned as is.
@@ -214,7 +214,7 @@ func TestRealDrive_ListByName_FollowsPagesWithTags(t *testing.T) {
 	files, err := api.listByName(context.Background(), "folder", "a.pdf")
 	require.NoError(t, err)
 	assert.Equal(t, []*driveFile{{ID: "f1", DocumentID: "doc-1"}, {ID: "f2"}}, files)
-	assert.Equal(t, `'folder' in parents and name = 'a.pdf' and trashed = false`, srv.queries[0])
+	assert.Equal(t, `'folder' in parents and name = 'a.pdf' and trashed = false and mimeType != 'application/vnd.google-apps.folder' and mimeType != 'application/vnd.google-apps.shortcut'`, srv.queries[0])
 }
 
 func TestRealDrive_Download(t *testing.T) {

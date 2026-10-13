@@ -43,6 +43,8 @@ type faultyContent struct {
 	*docref.MemoryContent
 	putErr, openErr, deleteErr error
 	unsized                    []byte
+	onDelete                   func(bucket, key string)
+	onDeleteCtx                func(ctx context.Context)
 }
 
 func (f *faultyContent) Put(ctx context.Context, key string, content []byte, contentType string) error {
@@ -63,6 +65,12 @@ func (f *faultyContent) Open(ctx context.Context, bucket, key string) (io.ReadCl
 }
 
 func (f *faultyContent) Delete(ctx context.Context, bucket, key string) error {
+	if f.onDelete != nil {
+		f.onDelete(bucket, key)
+	}
+	if f.onDeleteCtx != nil {
+		f.onDeleteCtx(ctx)
+	}
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -195,4 +203,93 @@ func TestNewMemoryService_RoundTrip(t *testing.T) {
 	_, body, err := svc.Read(ctx, "tenant-1", ref.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("x"), body)
+}
+
+// Deleting a reference that fails its integrity checks still needs the
+// store: a failure to delete the record is reported.
+func TestService_Delete_IntegrityViolation_ReferenceDeleteFailure(t *testing.T) {
+	t.Parallel()
+	svc, refs, content, ref := newFaultyService(t)
+	forged := ref
+	forged.Bucket = "elsewhere"
+	refs.Overwrite(forged)
+	refs.deleteErr = errBackend
+	err := svc.Delete(context.Background(), "tenant-1", ref.ID)
+	require.ErrorIs(t, err, errBackend)
+	assert.Equal(t, 1, content.Len(), "no object removed")
+}
+
+// Deleting a reference that fails its integrity checks also removes the
+// reference's own object: the canonical key, in the service's bucket,
+// derived from the tenant and the ID — never the bucket or key the record
+// names. A failure to delete it (or a missing object) is not reported: the
+// reference no longer resolves, and the lifecycle rule removes what is left.
+func TestService_Delete_IntegrityViolation_RemovesCanonicalObject(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	svc, refs, content, ref := newFaultyService(t)
+	forged := ref
+	forged.Bucket, forged.ObjectKey = "elsewhere", "other-tenant/x"
+	refs.Overwrite(forged)
+	var deleted []string
+	content.onDelete = func(bucket, key string) { deleted = append(deleted, bucket+"/"+key) }
+	require.NoError(t, svc.Delete(ctx, "tenant-1", ref.ID))
+	assert.Equal(t, []string{"docs/" + ref.ObjectKey}, deleted, "the canonical object, never the record's")
+	assert.Zero(t, content.Len())
+	require.NoError(t, svc.Delete(ctx, "tenant-1", ref.ID), "already gone: not found, no error")
+
+	svc, refs, content, ref = newFaultyService(t)
+	forged = ref
+	forged.SHA256 = "not-a-checksum"
+	refs.Overwrite(forged)
+	content.deleteErr = errBackend
+	require.NoError(t, svc.Delete(ctx, "tenant-1", ref.ID), "the object delete is best effort")
+	_, err := svc.Lookup(ctx, "tenant-1", ref.ID)
+	assert.ErrorIs(t, err, docref.ErrNotFound, "the record is gone")
+}
+
+// blockingStore's Delete blocks until its context ends, as a dead Valkey
+// does; its Put always fails.
+type blockingStore struct{ *docref.MemoryStore }
+
+func (blockingStore) Put(context.Context, docref.Ref) (docref.Ref, error) {
+	return docref.Ref{}, docref.ErrUnavailable
+}
+
+func (blockingStore) Delete(ctx context.Context, _, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// After a failed reference write the reference delete and the object delete
+// each get their own bounded time: a stalled metadata store cannot use up
+// the object delete's budget, and the cleanup outlives the caller's
+// cancellation.
+func TestService_CreateCleanup_ObjectDeleteHasItsOwnBudget(t *testing.T) {
+	t.Parallel()
+	content := &faultyContent{MemoryContent: docref.NewMemoryContent("docs")}
+	var objCtxErr error
+	content.onDeleteCtx = func(ctx context.Context) { objCtxErr = ctx.Err() }
+	svc := docref.NewService(blockingStore{docref.NewMemoryStore()}, content)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := svc.Create(context.WithoutCancel(ctx), "tenant-1", "text/plain", []byte("x"))
+	require.ErrorIs(t, err, docref.ErrUnavailable)
+	require.NoError(t, objCtxErr, "the object delete starts with a live context after the reference delete timed out")
+	assert.Zero(t, content.Len(), "the object is removed")
+}
+
+// The recorded size is not trusted for allocation: a forged huge size, with
+// a generous limit and an object whose length S3 does not report, fails
+// verification instead of being allocated up front.
+func TestService_Read_ForgedHugeSize_DoesNotPreallocate(t *testing.T) {
+	t.Parallel()
+	svc, refs, content, ref := newFaultyService(t)
+	forged := ref
+	forged.Size = 1 << 62
+	refs.Overwrite(forged)
+	content.unsized = []byte("hello")
+	_, _, err := svc.Read(context.Background(), "tenant-1", ref.ID, 1<<62)
+	assert.ErrorIs(t, err, docref.ErrIntegrityViolation)
 }

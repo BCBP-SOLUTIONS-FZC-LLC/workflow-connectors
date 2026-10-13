@@ -60,8 +60,10 @@ type SendError struct {
 	StatusCode int // 0 when no response was received
 	Err        error
 	// IntentUnrecorded: the outcome could not be stored on the call's send
-	// intent, which is left pending; an automatic retry with the same
-	// messageKey would be refused as a duplicate, so none is allowed.
+	// intent, which is left pending — or a reservation whose Reserve failed
+	// ambiguously could be neither confirmed nor released, and may surface
+	// pending. An automatic retry with the same messageKey would be refused
+	// as a duplicate, so none is allowed.
 	IntentUnrecorded bool
 }
 

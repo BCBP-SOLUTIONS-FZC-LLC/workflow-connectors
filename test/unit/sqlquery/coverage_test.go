@@ -47,7 +47,9 @@ func TestSQLQuery_MissingAlias_IsValidationError(t *testing.T) {
 
 func TestSQLQuery_UnencodableParams_IsValidationError(t *testing.T) {
 	t.Parallel()
-	conn := sqlquery.New(aliasesFor("http://127.0.0.1:1"), nil, testInternalToken)
+	aliases := aliasesFor("http://127.0.0.1:1")
+	aliases.SQLQuery[0].ParamCount = 1
+	conn := sqlquery.New(aliases, nil, testInternalToken)
 	_, err := conn.Execute(deptCtx, map[string]any{"queryAlias": "q", "params": []any{math.NaN()}})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, shared.ErrValidation)
@@ -98,4 +100,24 @@ func TestSQLQuery_MalformedResponse_IsPermanentUpstream(t *testing.T) {
 	assert.ErrorIs(t, err, shared.ErrUpstream)
 	assert.True(t, shared.IsPermanent(err))
 	assert.Contains(t, err.Error(), "decoding response")
+}
+
+// A 2xx whose body exceeds the cap was processed by the service: like
+// rest-call, the call fails permanently ("response too large"), never as
+// invalid input.
+func TestSQLQuery_OversizedResponse_IsPermanentNotValidation(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, shared.MaxResponseBytes+1))
+	}))
+	defer srv.Close()
+
+	_, err := sqlquery.New(aliasesFor(srv.URL), nil, testInternalToken).Execute(deptCtx, map[string]any{"queryAlias": "q"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, shared.ErrValidation, "the input was valid")
+	assert.ErrorIs(t, err, shared.ErrTooLarge)
+	assert.ErrorIs(t, err, shared.ErrUpstream)
+	class, reason := shared.ClassOf(err)
+	assert.Equal(t, shared.ClassPermanent, class)
+	assert.Equal(t, shared.ReasonResponseTooLarge, reason)
 }

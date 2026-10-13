@@ -26,7 +26,10 @@ func (e *DurabilityError) Error() string {
 // CheckDurability verifies the server is configured as the document-ref
 // system of record: on every master and every replica of a cluster, or the
 // one server. The worker calls it at startup and refuses to run on a
-// *DurabilityError.
+// *DurabilityError (check errors.As first). The error matches
+// ErrConfigUnavailable only when every failure is a refused CONFIG GET on a
+// node whose WAITAOF probe passed: a *DurabilityError, or any other failure,
+// on another node hides it.
 //
 // Each master (or the one server) is first probed with a real WAITAOF — the
 // command every Put depends on — which fails when the append-only file is
@@ -57,10 +60,40 @@ func CheckDurability(ctx context.Context, client redis.UniversalClient) error {
 		}
 		errMasters := c.ForEachMaster(ctx, check("master", checkNode))
 		errReplicas := c.ForEachSlave(ctx, check("replica", checkReplica))
-		return errors.Join(append(errs, errMasters, errReplicas)...)
+		return joinNodeErrors(append(errs, errMasters, errReplicas))
 	default:
 		return fmt.Errorf("docref: unsupported Valkey client %T: use *redis.Client (standalone or Sentinel) or *redis.ClusterClient", client)
 	}
+}
+
+// nodeErrors is a cluster's failures, one per node. It matches
+// ErrConfigUnavailable only when every failure is ErrConfigUnavailable: a
+// node that is not durable (a *DurabilityError) or could not be checked at
+// all must not be mistaken for "verify in the console" by a worker that
+// tolerates ErrConfigUnavailable.
+type nodeErrors struct {
+	errs    []error // every failure, for the message
+	matches []error // what errors.Is / errors.As see
+}
+
+func (e *nodeErrors) Error() string   { return errors.Join(e.errs...).Error() }
+func (e *nodeErrors) Unwrap() []error { return e.matches }
+
+func joinNodeErrors(errs []error) error {
+	var all, others []error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		all = append(all, err)
+		if !errors.Is(err, ErrConfigUnavailable) {
+			others = append(others, err)
+		}
+	}
+	if len(others) == 0 {
+		return errors.Join(all...) // nil, or only ErrConfigUnavailable
+	}
+	return &nodeErrors{errs: all, matches: others}
 }
 
 func checkNode(ctx context.Context, node *redis.Client) error {
@@ -101,14 +134,21 @@ func checkReplica(ctx context.Context, node *redis.Client) error {
 	return evaluate(settings)
 }
 
-// readSettings reads the settings evaluate judges; a refused CONFIG GET is
-// ErrConfigUnavailable.
+// readSettings reads the settings evaluate judges. Only a server reply
+// refusing CONFIG GET (unknown or renamed command, NOPERM) is
+// ErrConfigUnavailable; any other failure — the node unreachable, a
+// timeout, the pool exhausted, the context ended — is returned as is, so an
+// unreachable node is never mistaken for one whose settings must merely be
+// checked in the console.
 func readSettings(ctx context.Context, node *redis.Client) (map[string]string, error) {
 	settings := map[string]string{}
 	for _, name := range []string{"appendonly", "appendfsync", "maxmemory-policy"} {
 		values, err := node.ConfigGet(ctx, name).Result()
-		if err != nil {
+		if _, refused := errors.AsType[redis.Error](err); refused {
 			return nil, fmt.Errorf("%w: %w", ErrConfigUnavailable, err)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("CONFIG GET %s: %w", name, err)
 		}
 		settings[name] = values[name]
 	}

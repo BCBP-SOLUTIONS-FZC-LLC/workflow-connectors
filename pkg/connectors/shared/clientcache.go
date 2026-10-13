@@ -68,7 +68,11 @@ func (c *ClientCache[C]) Acquire(key string, build func() (C, error)) (*ClientHa
 
 	c.mu.Lock()
 	if e, ok := c.entries[key]; ok {
+		// Lost the race: use the stored client, and count this as a use so
+		// eviction sees it as recent.
 		e.refs++
+		c.clock++
+		e.lastUsed = c.clock
 		c.mu.Unlock()
 		closeClient(client)
 		return &ClientHandle[C]{cache: c, entry: e}, nil

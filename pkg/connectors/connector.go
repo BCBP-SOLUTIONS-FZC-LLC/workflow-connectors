@@ -15,9 +15,22 @@ type Connector interface {
 	Execute(ctx context.Context, input map[string]any) (map[string]any, error)
 }
 
+// New builds the connectors keyed by type: storage, send-email, chat-notify
+// and rest-call. It fails without cfg.InternalToken or when cfg.Aliases does
+// not pass aliasconfig.Config.Validate. chat-notify is built (a nil
+// ChatNotifyClient fails every call with ErrValidation) although
+// registry.All() does not list it. The storage and send-email connectors
+// implement interface{ ResetClients() } to drop their cached provider
+// clients (e.g. after a credential rotation).
 func New(cfg Config) (map[string]Connector, error) {
 	if cfg.InternalToken == "" {
 		return nil, fmt.Errorf("connectors: InternalToken is required (rest-call attaches it to every outbound request)")
+	}
+	// Aliases built in code need not have come through aliasconfig.Load:
+	// validate them here so a malformed alias fails at startup, not per call.
+	// The zero Config (no aliases) is valid.
+	if err := cfg.Aliases.Validate(); err != nil {
+		return nil, fmt.Errorf("connectors: Aliases: %w", err)
 	}
 
 	// Valkey is the single authoritative document-ref store: storage and

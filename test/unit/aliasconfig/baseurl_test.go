@@ -11,7 +11,8 @@ import (
 func TestValidate_BaseURLShape(t *testing.T) {
 	t.Parallel()
 
-	for _, bad := range []string{"tender-service.internal", "ftp://x", "file:///etc/passwd", "http://", "https://user:pw@x.internal", "://x"} {
+	for _, bad := range []string{"tender-service.internal", "ftp://x", "file:///etc/passwd", "http://", "https://user:pw@x.internal", "://x",
+		"http://svc.internal?x=1", "http://svc.internal/?", "http://svc.internal#frag", "http://svc.internal/#", "http://svc.internal/api?scope=own#f"} {
 		cfg := aliasconfig.Config{RestCall: []aliasconfig.Endpoint{{Alias: "a", Method: "GET", BaseURL: bad, PathTemplate: "/a"}}}
 		assert.Errorf(t, cfg.Validate(), "rest-call baseURL %q must be rejected", bad)
 

@@ -118,9 +118,12 @@ func (c *graphClient) Send(ctx context.Context, msg sendemail.EmailMessage) (str
 		})
 	}
 
-	// The request holds only strings, a bool and slices of those, which
-	// json.Marshal always encodes.
-	body, _ := json.Marshal(req)
+	body := encodeRequest(req)
+	if len(body) > maxRequestBytes {
+		// Checked before anything is sent: Graph would refuse it.
+		return "", sendemail.NotDelivered(providerName, 0, shared.Permanent("request too large",
+			fmt.Errorf("sendMail request is %d bytes, over the %d-byte inline limit (body and attachments together)", len(body), maxRequestBytes)))
+	}
 	ctx, written := sendemail.TraceWrites(ctx)
 	if err := c.api.sendMail(ctx, msg.SenderEmail, body); err != nil {
 		return "", classifyError(err, written)
@@ -128,13 +131,32 @@ func (c *graphClient) Send(ctx context.Context, msg sendemail.EmailMessage) (str
 	return "", nil
 }
 
+// encodeRequest encodes the sendMail request as JSON without HTML escaping:
+// json.Marshal would write each <, > and & of an HTML body as a 6-byte
+// \u003c escape, inflating the request against maxRequestBytes (Graph
+// decodes both forms to the same text). The request holds only strings, a
+// bool and slices of those, which always encode; the encoder's trailing
+// newline is dropped.
+func encodeRequest(req graphSendMailRequest) []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(req)
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+}
+
 const providerName = "microsoft-365"
 
-// maxAttachmentBytes is the total raw attachment size an inline sendMail
-// accepts: Graph refuses a request over 4 MB, and base64 grows attachments by
-// a third (larger files need an upload session, which this client does not
+// maxRequestBytes is the largest sendMail request Graph accepts inline (4 MB;
+// larger attachments need an upload session, which this client does not
 // use).
-const maxAttachmentBytes int64 = 3 << 20
+const maxRequestBytes = 4_000_000
+
+// maxAttachmentBytes is the total raw attachment size an inline sendMail
+// accepts: base64 grows attachments by a third (2,900,000 raw bytes encode
+// to 3,866,668), which leaves room for the JSON, subject and a modest body
+// under maxRequestBytes. Send still checks the encoded request as a whole.
+const maxAttachmentBytes int64 = 2_900_000
 
 // MaxAttachmentBytes is the total raw attachment size an inline sendMail
 // accepts.

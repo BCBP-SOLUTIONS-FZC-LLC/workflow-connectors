@@ -408,3 +408,66 @@ func TestDrive_RecordedFileDeletedOutsideConnector_ReuploadCreatesNewFile(t *tes
 		assert.Equal(t, 1, api.filesNamed(folder, "g.txt"))
 	})
 }
+
+// A recorded file deleted outside the connector is not the end of a fetch:
+// like a re-upload, it falls back to the oldest tagged file, then the oldest
+// untagged file of the name, and is not found (permanent) when neither exists.
+func TestDrive_Fetch_RecordedFileDeletedOutsideConnector_FallsBack(t *testing.T) {
+	forEachStore(t, func(t *testing.T, store documents.Store) {
+		ctx, api := tenantCtx(), newFakeDriveFilesAPI()
+		c := newTestClient(api, store)
+
+		require.NoError(t, c.Upload(ctx, folder, "h.txt", []byte("v1"), ""))
+		doc := getDoc(t, ctx, store, "h.txt")
+		require.NoError(t, api.delete(ctx, doc.ObjectID)) // removed in the Drive UI
+
+		_, _, err := c.Fetch(ctx, folder, "h.txt", 1<<20)
+		require.ErrorIs(t, err, shared.ErrUpstream)
+		class, _ := shared.ClassOf(err)
+		assert.Equal(t, shared.ClassPermanent, class)
+		assert.Contains(t, err.Error(), `no file named "h.txt"`)
+
+		api.placeFile(folder, "h.txt", "", []byte("untagged"))
+		content, _, err := c.Fetch(ctx, folder, "h.txt", 1<<20)
+		require.NoError(t, err)
+		assert.Equal(t, "untagged", string(content))
+
+		api.placeFile(folder, "h.txt", doc.ID, []byte("tagged"))
+		content, _, err = c.Fetch(ctx, folder, "h.txt", 1<<20)
+		require.NoError(t, err)
+		assert.Equal(t, "tagged", string(content), "a file tagged with the document wins over an untagged one")
+	})
+}
+
+// Any other failure to read the recorded file is the fetch's error.
+func TestDrive_Fetch_RecordedFileDownloadError_IsUpstream(t *testing.T) {
+	t.Parallel()
+	ctx, api := tenantCtx(), newFakeDriveFilesAPI()
+	c := newTestClient(api, documents.NewMemoryStore())
+	require.NoError(t, c.Upload(ctx, folder, "i.txt", []byte("v1"), ""))
+
+	api.err = errors.New("drive down")
+	_, _, err := c.Fetch(ctx, folder, "i.txt", 1<<20)
+	require.ErrorIs(t, err, shared.ErrUpstream)
+	assert.Contains(t, err.Error(), `drive fetch "i.txt"`)
+}
+
+// failingDownloads is the fake Drive with every download failing.
+type failingDownloads struct{ *fakeDriveFilesAPI }
+
+func (failingDownloads) download(context.Context, string, int64) ([]byte, string, error) {
+	return nil, "", errFakeDrive
+}
+
+// A file found by name that then fails to download is the fetch's error.
+func TestDrive_Fetch_UnrecordedFileDownloadError_IsUpstream(t *testing.T) {
+	t.Parallel()
+	api := newFakeDriveFilesAPI()
+	api.placeFile(folder, "j.txt", "", []byte("x"))
+	c := newTestClient(failingDownloads{api}, documents.NewMemoryStore())
+
+	_, _, err := c.Fetch(tenantCtx(), folder, "j.txt", 1<<20)
+	require.ErrorIs(t, err, shared.ErrUpstream)
+	assert.ErrorIs(t, err, errFakeDrive)
+	assert.Contains(t, err.Error(), `drive fetch "j.txt"`)
+}

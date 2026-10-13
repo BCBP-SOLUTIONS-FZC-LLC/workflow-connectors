@@ -55,3 +55,49 @@ func TestMemory_ClaimExisting_TakesOverAnIdleRow(t *testing.T) {
 	assert.Equal(t, doc.ID, taken.ID)
 	assert.Equal(t, "b", taken.Owner)
 }
+
+// Every owner transition is conditional on the owner and a live lease, as in
+// sqlstore: another attempt, an unknown row and an expired lease all get
+// ErrOwnershipLost and change nothing.
+func TestMemory_TransitionsNeedTheOwnerAndALiveLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	transitions := map[string]func(s *documents.MemoryStore, docID, attempt string) error{
+		"advance": func(s *documents.MemoryStore, docID, attempt string) error {
+			_, err := s.Advance(ctx, docID, attempt, documents.StateUploading)
+			return err
+		},
+		"complete": func(s *documents.MemoryStore, docID, attempt string) error {
+			_, err := s.Complete(ctx, docID, attempt, documents.Result{ObjectID: "f"})
+			return err
+		},
+		"fail": func(s *documents.MemoryStore, docID, attempt string) error {
+			_, err := s.Fail(ctx, docID, attempt, "boom")
+			return err
+		},
+		"remove": func(s *documents.MemoryStore, docID, attempt string) error {
+			return s.Remove(ctx, docID, attempt)
+		},
+	}
+	for name, transition := range transitions {
+		store := documents.NewMemoryStore()
+		store.SetClock(func() time.Time { return now })
+		id := documents.Identity{TenantID: "t", Provider: "google-drive", Container: "folder", Filename: name}
+		doc, claimed, err := store.Claim(ctx, id, "owner", time.Minute)
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		assert.ErrorIs(t, transition(store, doc.ID, "intruder"), documents.ErrOwnershipLost, "%s: another attempt", name)
+		assert.ErrorIs(t, transition(store, "no-such-doc", "owner"), documents.ErrOwnershipLost, "%s: unknown row", name)
+
+		store.SetClock(func() time.Time { return now.Add(time.Minute) })
+		assert.ErrorIs(t, transition(store, doc.ID, "owner"), documents.ErrOwnershipLost, "%s: lease expired", name)
+
+		got, found, err := store.Get(ctx, id)
+		require.NoError(t, err)
+		require.True(t, found, name)
+		assert.Equal(t, documents.StatePendingUpload, got.State, "%s: unchanged", name)
+		assert.Equal(t, "owner", got.Owner, name)
+	}
+}

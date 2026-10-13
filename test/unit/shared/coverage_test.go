@@ -111,10 +111,18 @@ func TestDecodeResponseBody_InvalidJSONFallsBackToString(t *testing.T) {
 	assert.Equal(t, "{not json", v)
 }
 
+func TestDecodeResponseBody_OverLimitIsTooLarge(t *testing.T) {
+	t.Parallel()
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(strings.Repeat("x", int(shared.MaxResponseBytes)+1)))}
+	_, err := shared.DecodeResponseBody(resp)
+	require.ErrorIs(t, err, shared.ErrTooLarge)
+	assert.ErrorIs(t, err, shared.ErrValidation)
+}
+
 func TestFormatParam_Float32(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "3", shared.FormatParam(float32(3)))
-	assert.Equal(t, "1.5", shared.FormatParam(float32(1.5)))
+	assert.Equal(t, "3", formatScalar(t, float32(3)))
+	assert.Equal(t, "1.5", formatScalar(t, float32(1.5)))
 }
 
 type failingReader struct{ err error }
