@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-13
+
 Production-readiness fixes from a review of the whole library. New exported API only (no signature changed; `make api-compat` is clean), so the next release is a MINOR. Some inputs that used to be accepted are now refused: read **Changed** and **Removed** before upgrading.
 
 ### Added
@@ -34,7 +36,7 @@ Production-readiness fixes from a review of the whole library. New exported API 
   - A rest-call alias `pathTemplate` containing `#` is refused when aliases are validated: everything after `#` was a fragment that is never sent, so `/x#?role=user` fixed no query key and a caller's `queryParams` could set `role` (write a literal `#` as `%23`). Also refused: a character not valid in a URL outside a placeholder, an unterminated `{`, and a `%` in the path part not followed by two hex digits (`/x/%{id}` rendered an encoded slash). `shared.NewInternalRequest` also refuses a path containing `#`.
   - `shared.ApplyQueryParams` refuses an empty query parameter name.
   - send-email refuses a `body` over 5 MiB and a `subject` over 998 bytes, before any intent is reserved.
-- **The S3, Azure and GCS storage clients no longer retry inside the SDK** (`aws.NopRetryer`, Azure `MaxRetries: -1`, GCS `RetryNever`): one request per call, and the worker decides with `DecideRetry`. Each client has its own transport, a 2-minute request timeout and never follows a redirect. `cloud.google.com/go/storage` is now a direct dependency (same version, granted to the adapters in `.go-arch-lint.yml`). Never set `STORAGE_EMULATOR_HOST` on the worker: the GCS SDK reads it.
+- **The S3, Azure and GCS storage clients no longer retry inside the SDK** (`aws.NopRetryer`, Azure `MaxRetries: -1`, GCS `RetryNever`): one request per call, and the worker decides with `DecideRetry`. Each client has its own transport, a 10-minute request timeout (2 minutes to the first response byte) and never follows a redirect. `cloud.google.com/go/storage` is now a direct dependency (same version, granted to the adapters in `.go-arch-lint.yml`). The GCS SDK honours `STORAGE_EMULATOR_HOST`, which would send every tenant's `gcp-gcs` traffic, unauthenticated, to that host: `gcp-gcs` now refuses to build a client while it is set. Storage requests are bounded at 10 minutes in total (enough for a 50 MiB object at about 0.7 Mbit/s) and 2 minutes to the first response byte.
 - **Gmail (google-workspace) uploads the message as `message/rfc822` through the media-upload endpoint** in one request. Attachments are limited to 17,000,000 raw bytes and the encoded message to 25,000,000 bytes (refused before sending, not delivered, permanent), down from 25 MiB raw, which could not fit once encoded. Long subjects are folded within RFC 5322's 998-character line limit.
 - **After the reservation, a send-email failure whose outcome cannot be recorded is always a `SendError` with `IntentUnrecorded`** (class unknown), including invalid input found after the reservation: `errors.Is(err, ErrValidation)` no longer matches there; the cause is in `SendError.Err`.
 - **An `azure-blob` delete of a blob with snapshots (409 `SnapshotsPresent`) explains** that the snapshots must be deleted outside the connector; it stays permanent and snapshots are never deleted.
@@ -53,7 +55,7 @@ Production-readiness fixes from a review of the whole library. New exported API 
   - Worker and database clocks need NTP (Drive lease deadlines).
   - Migration `000002`'s index build locks a large audit table.
   - LLD rev 1.18: `execution_service` runs the connector worker on this module's `v2.0.0` (OQ-14 and OQ-17 closed), the dropped open questions are struck through for future reference, the removed `call_pool` task is gone from §S5, and the Workflow team's sign-off is recorded in §16.1. No code or API change.
-  - LLD rev 1.19 describes this release (unreleased, next `v2.1.0`): every change listed under `[Unreleased]`, the upgrade steps (§19.4) and OQ-18 (`chat-notify` leaving `registry.All()`); the §16.1 sign-off rows need re-signing before `v2.1.0`.
+  - LLD rev 1.19 describes this release (unreleased, next `v2.1.0`): every change listed in this section, the upgrade steps (§19.4) and OQ-18 (`chat-notify` leaving `registry.All()`); the §16.1 sign-off rows need re-signing before `v2.1.0`.
 
 ### Deprecated
 

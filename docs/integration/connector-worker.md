@@ -83,7 +83,7 @@ Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient
 
 The library reads no environment variables (one SDK it builds does: see `STORAGE_EMULATOR_HOST` below). The worker reads these and passes the results in.
 
-**Never set `STORAGE_EMULATOR_HOST` in the worker's environment.** The library does not read it, but the GCS SDK it builds for `gcp-gcs` does: with it set, tenant GCS traffic would go, unauthenticated, to that host. Check the worker's image, Helm values and any sidecar injection.
+**Never set `STORAGE_EMULATOR_HOST` in the worker's environment.** The library does not read it, but the GCS SDK it builds for `gcp-gcs` does: with it set, tenant GCS traffic would go, unauthenticated, to that host. Check the worker's image, Helm values and any sidecar injection. Since v2.1.0, `gcp-gcs` refuses to build a client while it is set (an upstream error naming the variable), so a misconfigured worker fails its GCS calls instead of leaking them.
 
 | Variable | Read by | Value |
 |---|---|---|

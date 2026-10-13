@@ -190,7 +190,10 @@ func TestGocloud_HTTPClientsAreBounded(t *testing.T) {
 	for _, c := range []storage.ProviderClient{s3Client, azClient} {
 		gc := c.(*gocloudStorageClient)
 		require.NotNil(t, gc.httpClient)
-		assert.Equal(t, shared.ProviderHTTPTimeout, gc.httpClient.Timeout, gc.provider)
+		assert.Equal(t, storageHTTPTimeout, gc.httpClient.Timeout, gc.provider)
+		tr, ok := gc.httpClient.Transport.(*http.Transport)
+		require.True(t, ok, gc.provider)
+		assert.Equal(t, shared.ProviderHTTPTimeout, tr.ResponseHeaderTimeout, gc.provider)
 		assert.NotSame(t, http.DefaultTransport, gc.httpClient.Transport, gc.provider)
 		assert.NoError(t, c.(io.Closer).Close())
 	}
@@ -205,7 +208,7 @@ func TestGocloud_HTTPClientsAreBounded(t *testing.T) {
 	}
 	gcsClient, err := openGCSBucket(context.Background(), "b", map[string]any{"gcpServiceAccountKey": serviceAccountJSON(t, "unused")})
 	require.NoError(t, err)
-	assert.Equal(t, shared.ProviderHTTPTimeout, built.Timeout)
+	assert.Equal(t, storageHTTPTimeout, built.Timeout)
 	require.NotNil(t, gcsClient.(*gocloudStorageClient).httpClient)
 	assert.NoError(t, gcsClient.(io.Closer).Close())
 }
@@ -320,4 +323,36 @@ func TestAzureDelete_SnapshotsPresent_IsPermanentAndExplained(t *testing.T) {
 	assert.Contains(t, err.Error(), "the blob has snapshots")
 	assert.Contains(t, err.Error(), "outside the connector")
 	assert.Equal(t, []string{"DELETE "}, methods, "one delete, never asking to delete snapshots")
+}
+
+// A 50 MiB object must fit inside the whole-request bound at a slow but
+// workable rate, while a silent server is still cut off after the provider
+// timeout.
+func TestStorageHTTPTimeout_FitsTheLargestObject(t *testing.T) {
+	t.Parallel()
+	const slowLink = 700_000 / 8 // bytes per second at 0.7 Mbit/s
+	assert.GreaterOrEqual(t, storageHTTPTimeout.Seconds(), float64(shared.MaxObjectBytes)/slowLink)
+	assert.Equal(t, shared.ProviderHTTPTimeout, storageTransport().ResponseHeaderTimeout)
+}
+
+// With STORAGE_EMULATOR_HOST set, the GCS SDK would send the tenant's
+// requests, unauthenticated, to that host: no client is built and no request
+// is made. Not parallel: it sets an environment variable.
+func TestOpenGCSBucket_EmulatorHostSet_IsRefused(t *testing.T) {
+	t.Setenv(storageEmulatorHostEnv, "evil.invalid:9000")
+	called := false
+	orig := newGCSClient
+	t.Cleanup(func() { newGCSClient = orig })
+	newGCSClient = func(ctx context.Context, opts ...option.ClientOption) (*gcs.Client, error) {
+		called = true
+		return orig(ctx, opts...)
+	}
+
+	_, err := openGCSBucket(context.Background(), "b", map[string]any{"gcpServiceAccountKey": serviceAccountJSON(t, "unused")})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errEmulatorHostSet)
+	assert.ErrorIs(t, err, shared.ErrUpstream)
+	assert.Contains(t, err.Error(), "evil.invalid:9000")
+	assert.False(t, shared.IsTransient(err), "a worker misconfiguration is not retried")
+	assert.False(t, called, "no GCS client is built")
 }

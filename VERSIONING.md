@@ -25,7 +25,7 @@ Still **MAJOR**, whatever the motive: a changed or removed exported identifier o
 | **v2.0.0** | **Current** — released 2026-10-10 (`CHANGELOG.md` `[2.0.0]`) | `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2` |
 | v1.0.0 | Released 2026-10-09; not supported (see `SECURITY.md`) | `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors` |
 
-Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@v2.0.0` with `GOPRIVATE` set. The next release is v2.0.1 for fixes and v2.1.0 for backward-compatible features; changes since v2.0.0 collect under `[Unreleased]`.
+Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@v2.0.0` with `GOPRIVATE` set. The next release is v2.1.0 (CHANGELOG section cut 2026-10-13, tagged once merged to `main`); after it, v2.1.1 for fixes and v2.2.0 for backward-compatible features; changes after v2.1.0 collect under `[Unreleased]`.
 
 ## Consume a release
 

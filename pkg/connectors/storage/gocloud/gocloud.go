@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	gcs "cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -264,7 +266,7 @@ var (
 	newS3Client             = func(cfg aws.Config) *s3.Client { return s3.NewFromConfig(cfg) }
 	// newGCSTransport is the transport under the GCS OAuth layer: this
 	// client's own, so Close drops only its idle connections.
-	newGCSTransport = func() http.RoundTripper { return shared.BaseTransport() }
+	newGCSTransport = func() http.RoundTripper { return storageTransport() }
 )
 
 var azureAccountPattern = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
@@ -282,6 +284,13 @@ func validAzureContainer(name string) bool {
 var azureContainerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
 func openGCSBucket(ctx context.Context, bucketName string, params map[string]any) (storage.ProviderClient, error) {
+	// The GCS SDK (and gocloud's gcsblob) honours STORAGE_EMULATOR_HOST from
+	// the process environment and would then send this tenant's requests,
+	// without credentials, to that host. The library reads no other
+	// environment; this one is refused rather than obeyed.
+	if host := os.Getenv(storageEmulatorHostEnv); host != "" {
+		return nil, upstream("gcp-gcs", fmt.Errorf("%w: %s is set on the worker (%q); unset it", errEmulatorHostSet, storageEmulatorHostEnv, host))
+	}
 	serviceAccountKey := shared.StringField(params, "gcpServiceAccountKey")
 	if serviceAccountKey == "" {
 		return nil, fmt.Errorf("%w: gcpServiceAccountKey is required for gcp-gcs", shared.ErrValidation)
@@ -302,7 +311,7 @@ func openGCSBucket(ctx context.Context, bucketName string, params map[string]any
 	// Never follow a redirect: the OAuth transport would re-send the request
 	// and its bearer token to whichever host it names.
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	httpClient.Timeout = shared.ProviderHTTPTimeout
+	httpClient.Timeout = storageHTTPTimeout
 
 	client, err := newGCSClient(ctx, option.WithHTTPClient(&httpClient.Client))
 	if err != nil {
@@ -467,15 +476,35 @@ func (c *gocloudStorageClient) Close() error {
 	return err
 }
 
+// storageHTTPTimeout bounds a whole storage request, body included. It is
+// longer than shared.ProviderHTTPTimeout because a request carries up to
+// shared.MaxObjectBytes (50 MiB): 10 minutes still lets that through at about
+// 0.7 Mbit/s. A server that does not start answering is cut off sooner, by
+// the transport's ResponseHeaderTimeout (shared.ProviderHTTPTimeout).
+const storageHTTPTimeout = 10 * time.Minute
+
+const storageEmulatorHostEnv = "STORAGE_EMULATOR_HOST"
+
+// errEmulatorHostSet: the worker's environment would redirect GCS traffic.
+var errEmulatorHostSet = errors.New("gcp-gcs refuses to run with an emulator host configured")
+
+// storageTransport is a storage client's own transport: Go's defaults
+// (shared.BaseTransport), with a bound on the wait for response headers.
+func storageTransport() *http.Transport {
+	t := shared.BaseTransport()
+	t.ResponseHeaderTimeout = shared.ProviderHTTPTimeout
+	return t
+}
+
 // newTransportClient gives a client its own connection pool, so closing it
 // never affects another tenant's client. Each request is bounded by
-// shared.ProviderHTTPTimeout (a call's earlier deadline still wins), and a
-// redirect is returned, never followed: it would re-send the signed request
-// to whichever host the response names.
+// storageHTTPTimeout (a call's earlier deadline still wins), and a redirect
+// is returned, never followed: it would re-send the signed request to
+// whichever host the response names.
 func newTransportClient() *http.Client {
 	return &http.Client{
-		Transport:     shared.BaseTransport(),
-		Timeout:       shared.ProviderHTTPTimeout,
+		Transport:     storageTransport(),
+		Timeout:       storageHTTPTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
