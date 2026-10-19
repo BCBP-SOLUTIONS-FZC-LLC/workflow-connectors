@@ -5,7 +5,7 @@ The shared connector library for the workflow engine — the **fixed catalogue o
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`
 **Module:** Go 1.26.9 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
 **Version:** **v2.1.0** is the current release (2026-10-13): production-readiness changes with new exports only, but some inputs that used to be accepted are now refused. See `CHANGELOG.md` `[2.1.0]` and [Upgrading from v2.0.0](#7-upgrading-from-v200); v2.0.0 (2026-10-10) precedes it
-**Design:** one LLD, `docs/lld/workflow-connectors-library-lld.md` (**rev 1.19**; rev 1.18 is the one signed off for v2.0.0). Part I (§1–§21) is the module design; Part II (§S1–§S11) is the *Automatic Connector Tasks & Connector Workers* system design (rev 8.14) across `workflow-models`, `definition_service`, `execution_service` and this module. Where they disagree, Part II is authoritative. "LLD §S…" and "Decision #N" in this README cite Part II; "module LLD §…" cites Part I.
+**Design:** one LLD, `docs/lld/workflow-connectors-library-lld.md` (**rev 1.20**; rev 1.18 is the one signed off, for v2.0.0). Part I (§1–§21) is the module design; Part II (§S1–§S11) is the *Automatic Connector Tasks & Connector Workers* system design (rev 8.14) across `workflow-models`, `definition_service`, `execution_service` and this module. Where they disagree, Part II is authoritative. "LLD §S…" and "Decision #N" in this README cite Part II; "module LLD §…" cites Part I.
 
 ---
 
@@ -544,7 +544,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and the PR checklis
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Layer model, dependency rules, execution and internal-auth flows, client cache, document refs, failure domains, invariants, consumer checklist, threat model |
 | [`docs/architecture/`](docs/architecture/README.md) | Standalone Mermaid diagrams |
-| [`docs/lld/workflow-connectors-library-lld.md`](docs/lld/workflow-connectors-library-lld.md) | The LLD, rev 1.19 — Part I: §5 public API and connector contracts, §16 open questions, §17 error taxonomy, §19 migration; Part II: system design, §S6.4 catalogue field tables, §S10 decision log |
+| [`docs/lld/workflow-connectors-library-lld.md`](docs/lld/workflow-connectors-library-lld.md) | The LLD, rev 1.20 — Part I: §5 public API and connector contracts, §16 open questions, §17 error taxonomy, §19 migration; Part II: system design, §S6.4 catalogue field tables, §S10 decision log |
 | [`.go-arch-lint.yml`](.go-arch-lint.yml) | Executable dependency rules |
 | [`VERSIONING.md`](VERSIONING.md) | SemVer rules and release process |
 | [`docs/runbooks/email-delivery.md`](docs/runbooks/email-delivery.md) | send-email delivery outcomes, what to log and alert on, and how to handle an `unknown` outcome |
