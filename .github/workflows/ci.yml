@@ -136,6 +136,7 @@ jobs:
     secrets:
       GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
       CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
+      DESIGN_REPO_TOKEN: ${{ secrets.DESIGN_REPO_TOKEN }}
 
   # ── informational: exported-API changes since the last release ──────────
   # Warns (never fails) on an incompatible change: the next version is

@@ -109,6 +109,7 @@ jobs:
     secrets:
       GO_PRIVATE_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
       CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
+      DESIGN_REPO_TOKEN: ${{ secrets.DESIGN_REPO_TOKEN }}
 
   # ── release-only gate: no incompatible exported-API change in a non-major
   # release (apidiff vs the highest stable tag below this one).

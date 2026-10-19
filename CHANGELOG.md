@@ -70,6 +70,7 @@ Production-readiness fixes from a review of the whole library. New exported API 
 
 ### Added
 
+- A check that the documents this repository keeps in the design repository still match their copies there: `make design-sync-check` (`DESIGN_DIR` reads a local checkout, otherwise `GH_TOKEN` reads `Haroon-BCBP/design`) compares the pairs listed in `scripts/design-sync.manifest`, and `make design-sync-check-test` tests the script. The CI step runs when `DESIGN_REPO_TOKEN` is set and says so when it is not.
 - **rest-call output `method`**, returned on every result once the request was sent. The worker passes it to `DecideRetry` instead of re-resolving the alias.
 - **`sendintent.Releaser`** (`Release(…) (released bool, err error)`), implemented by `MemoryStore` and `sqlstore.Store`, plus `ErrNotReserved`, `ErrNoToken` and `ReleasedDetail`.
 - **`PruneIntents(ctx, olderThan, batch)`** on both send-intent stores, plus `ErrPruneArgs`. Pruning a key reopens its duplicate window.

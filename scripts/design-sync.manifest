@@ -1,0 +1,2 @@
+# <kind> <repo path> <design path>; see scripts/design-sync-check.sh
+lld docs/lld/workflow-connectors-library-lld.md LLD/workflow_connectors_lib.md

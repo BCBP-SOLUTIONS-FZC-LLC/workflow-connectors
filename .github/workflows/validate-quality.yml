@@ -33,6 +33,9 @@ name: Validate / Quality
       CI_REPO_READ_TOKEN:
         description: 'Checkout of a private repository (github.token is the fallback)'
         required: false
+      DESIGN_REPO_TOKEN:
+        description: 'Read access to the design repository, for the design copy check (the check is skipped without it)'
+        required: false
 
 permissions:
   contents: read
@@ -165,3 +168,27 @@ jobs:
             echo "::error file=go.mod,title=Vulnerability found::govulncheck detected vulnerabilities — run 'make vuln-check' locally to view details."
             exit 1
           fi
+
+  design-sync:
+    name: design copies
+    if: ${{ !inputs.skip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      # Each document kept in the design repository too must still match it. That repository is not in
+      # this organisation, so the step compares only when DESIGN_REPO_TOKEN is set.
+      - name: Design copy check
+        env:
+          DESIGN_REPO_TOKEN: ${{ secrets.DESIGN_REPO_TOKEN }}
+        run: |
+          if [ -z "$DESIGN_REPO_TOKEN" ]; then
+            echo "::notice::DESIGN_REPO_TOKEN is not set, so the design copies are not compared"
+            exit 0
+          fi
+          GH_TOKEN="$DESIGN_REPO_TOKEN" make design-sync-check
