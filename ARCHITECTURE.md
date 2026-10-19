@@ -629,7 +629,7 @@ There is no server, so no Swagger, AsyncAPI or docs routes. Everything runs thro
 | Target | Purpose |
 |---|---|
 | `make setup` | Create `.env` from `.env-example` if missing, `go mod download`, and install `.githooks/pre-commit` (tidy-check, fmt-check, lint) |
-| `make ci` | tidy-check (library and tools module) · fmt-check · vet · lint · arch-lint · docs-check · docs-compile · ci-scripts-test · test-ci · build — the same gates CI runs |
+| `make ci` | design-sync-check-test · tidy-check (library and tools module) · fmt-check · vet · lint · arch-lint · docs-check · docs-compile · ci-scripts-test · test-ci · build — the same gates CI runs |
 | `make arch-lint` | `go-arch-lint` (pinned v1.15.0) against `.go-arch-lint.yml` |
 | `make docs-check` | Every `docs/architecture/mermaid/*.mmd` diagram is embedded verbatim in this file (also in CI) |
 | `make docs-compile` | The worker skeleton in `docs/integration/connector-worker.md` compiles against this checkout (also in CI) |

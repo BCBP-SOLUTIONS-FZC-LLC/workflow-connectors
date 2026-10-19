@@ -4,7 +4,7 @@ The shared connector library for the workflow engine — the **fixed catalogue o
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`
 **Module:** Go 1.26.9 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
-**Version:** **v2.0.0** is the current release (2026-10-10). This branch carries unreleased production-readiness changes for **v2.1.0** (new exports only, but some inputs that used to be accepted are now refused): see `CHANGELOG.md` `[Unreleased]` and [Upgrading from v2.0.0](#7-upgrading-from-v200)
+**Version:** **v2.1.0** is the current release (2026-10-13): production-readiness changes with new exports only, but some inputs that used to be accepted are now refused. See `CHANGELOG.md` `[2.1.0]` and [Upgrading from v2.0.0](#7-upgrading-from-v200); v2.0.0 (2026-10-10) precedes it
 **Design:** one LLD, `docs/lld/workflow-connectors-library-lld.md` (**rev 1.19**; rev 1.18 is the one signed off for v2.0.0). Part I (§1–§21) is the module design; Part II (§S1–§S11) is the *Automatic Connector Tasks & Connector Workers* system design (rev 8.14) across `workflow-models`, `definition_service`, `execution_service` and this module. Where they disagree, Part II is authoritative. "LLD §S…" and "Decision #N" in this README cite Part II; "module LLD §…" cites Part I.
 
 ---
@@ -61,7 +61,7 @@ func ClassOf(err error) (ErrorClass, string)                    // also IsTransi
 func DecideRetry(connectorType string, err error, method string) RetryDecision // method: rest-call output["method"]
 ```
 
-New exports since v2.0.0 (unreleased, MINOR): `registry.Lookup` and `registry.ChatNotifyDefinition`; `sendintent.Releaser` (`Release(…) (released bool, err error)`, implemented by both stores), `sendintent.ErrNotReserved`, `ErrNoToken`, `ReleasedDetail` and `ErrPruneArgs`; `PruneIntents(ctx, olderThan, batch)` on `sendintent.MemoryStore` and `sendintent/sqlstore.Store`; `valkeystore.Options.Validate()` and `ErrInvalidOptions`; `shared.BaseTransport`, `shared.FormatScalarParam` (`shared.FormatParam` is deprecated) and `shared.ReasonResponseTooLarge` (`restcall.ReasonResponseTooLarge` equals it).
+New exports in v2.1.0 (MINOR, over v2.0.0): `registry.Lookup` and `registry.ChatNotifyDefinition`; `sendintent.Releaser` (`Release(…) (released bool, err error)`, implemented by both stores), `sendintent.ErrNotReserved`, `ErrNoToken`, `ReleasedDetail` and `ErrPruneArgs`; `PruneIntents(ctx, olderThan, batch)` on `sendintent.MemoryStore` and `sendintent/sqlstore.Store`; `valkeystore.Options.Validate()` and `ErrInvalidOptions`; `shared.BaseTransport`, `shared.FormatScalarParam` (`shared.FormatParam` is deprecated) and `shared.ReasonResponseTooLarge` (`restcall.ReasonResponseTooLarge` equals it).
 
 ### Connectors built by `New` (4)
 
@@ -244,7 +244,7 @@ for _, f := range def.Inputs {
 }
 ```
 
-**Upgrade note (unreleased v2.1.0):** `chat-notify` is no longer in `registry.All()`. Once the definition service moves to this version, for an existing workflow with a `connector:chat-notify` task, publishing still succeeds but raises an `UNKNOWN_CONNECTOR_TYPE` **warning** (`validator/connector_task.go`), and the definition service's connector API no longer serves the chat-notify template and refuses to write or revoke its credentials (`connector_service.go`). Such a task never worked (there is no chat provider; every call failed with `ErrValidation`); find and remove them before upgrading. Runtime code keeps using `registry.Lookup`, which still returns the `chat-notify` definition.
+**Upgrade note (v2.1.0):** `chat-notify` is no longer in `registry.All()`. Once the definition service moves to this version, for an existing workflow with a `connector:chat-notify` task, publishing still succeeds but raises an `UNKNOWN_CONNECTOR_TYPE` **warning** (`validator/connector_task.go`), and the definition service's connector API no longer serves the chat-notify template and refuses to write or revoke its credentials (`connector_service.go`). Such a task never worked (there is no chat provider; every call failed with `ErrValidation`); find and remove them before upgrading. Runtime code keeps using `registry.Lookup`, which still returns the `chat-notify` definition.
 
 ### 3. Connector worker — run side
 
@@ -277,7 +277,7 @@ The library never retries and has no rate limiter, and no provider client it bui
 
 ### 7. Upgrading from v2.0.0
 
-The next release (v2.1.0, unreleased on this branch) changes no signature, but refuses some inputs v2.0.0 accepted and needs infrastructure changes. Before upgrading:
+v2.1.0 changes no signature, but refuses some inputs v2.0.0 accepted and needs infrastructure changes. Before upgrading from v2.0.0:
 
 - **Definition service:** `chat-notify` left `registry.All()`, so publishing a workflow with a `connector:chat-notify` task gives an `UNKNOWN_CONNECTOR_TYPE` warning (not an error) and its template and credential endpoints are refused; find and remove such tasks first (§2). Storage and send-email `provider` are now `Required` in the registry.
 - **Valkey ACL:** add `+asking` to the worker's user (`ACL SETUSER docref-worker +asking`, then persist it) before any resharding; without it every ref in a migrating slot fails with `ASKING: NOPERM` (class unknown). On a cluster, on every node.
@@ -312,7 +312,8 @@ make ci          # everything CI runs
 | Command | Description |
 |---|---|
 | `make setup` | Create `.env` from `.env-example` if missing, `go mod download`, install the pre-commit hook |
-| `make ci` | tidy-check (library and tools module) · fmt-check · vet · lint · arch-lint · docs-check · docs-compile · ci-scripts-test · test-ci · build |
+| `make design-sync-check` / `make design-sync-check-test` | Fail when a document kept here and in the design repository differs (`DESIGN_DIR=<checkout>`, or `GH_TOKEN` reads `Haroon-BCBP/design`); the test runs the script against throwaway directories. CI skips the check with a notice until the `DESIGN_REPO_TOKEN` secret exists |
+| `make ci` | design-sync-check-test · tidy-check (library and tools module) · fmt-check · vet · lint · arch-lint · docs-check · docs-compile · ci-scripts-test · test-ci · build |
 | `make test-unit` | Unit suite: `test/unit/...` + white-box tests in `./pkg/...` — no Docker |
 | `make test-postgres` | Postgres suite (`-tags integration`): `test/postgres/...` + `storage/googledrive`'s PostgreSQL leg — direct and through PgBouncer |
 | `make test-integration` | Integration suite (`-tags integration`): `test/integration/...` — Valkey, floci S3, PostgreSQL, Valkey restart tests, Valkey Cluster slot migration |
@@ -468,7 +469,7 @@ Six workflow files, in the same structure as platform-pgcommon's (scoped to a li
 
 - **`ci.yml`** — orchestrator. A **`changes`** job (`.github/scripts/detect-changes.sh`) decides whether the build/test jobs run: a documentation-only change (any `*.md` except `docs/integration/connector-worker.md`, whose Go skeleton is compiled; `docs/architecture/*.mmd`), a draft PR or a PR labelled `skip-ci` skips them. The workflow itself always runs, and the reusable validate workflows receive a `skip` input and skip their own job, so the required checks still report on a docs-only PR (a `paths-ignore` would leave them pending forever). Then `validate-test.yml` ∥ `validate-quality.yml` ∥ **API compatibility** (apidiff against the last stable tag, warning only); after tests, a Trivy filesystem scan of `go.mod`/`go.sum` (CRITICAL/HIGH/UNKNOWN fail; `tools/` skipped; the vulnerability DB cache key includes the date, so it refreshes daily) with SARIF and a CycloneDX SBOM; a PR summary comment. "Build image (cache)", "Lint Dockerfile" and "Smoke tests" are no-op placeholders for the org branch-protection ruleset (there is no Dockerfile, image or runtime).
 - **`validate-test.yml`** (reusable) — images pulled (with retries) from `mirror.gcr.io`, Google's Docker Hub mirror (`WC_REGISTRY`; anonymous Docker Hub pulls from runner IPs hit the rate limit) → `docker compose up -d --wait` with the `valkey-cluster` profile (the same stack as local; with `CI` set no infrastructure test can skip) → `make test-ci` (unit, postgres and integration suites in parallel, `-race`, merged coverage) → coverage gate (**98%**) → compose logs on failure → coverage artifact → `make build`.
-- **`validate-quality.yml`** (reusable) — `go mod verify` → HTML-escaped-operator check on workflow files → **every action pinned to a commit SHA** → gofmt → `go mod tidy` drift → vet → golangci-lint → **go-arch-lint** (pinned v1.15.0, cached) → `make docs-check` → `make docs-compile` (the worker skeleton compiles) → `make ci-scripts-test` (`detect-changes.sh`'s docs-only verdict, 24 cases) → govulncheck.
+- **`validate-quality.yml`** (reusable) — `go mod verify` → HTML-escaped-operator check on workflow files → **every action pinned to a commit SHA** → gofmt → `go mod tidy` drift → vet → golangci-lint → **go-arch-lint** (pinned v1.15.0, cached) → `make docs-check` → `make docs-compile` (the worker skeleton compiles) → `make ci-scripts-test` (`detect-changes.sh`'s docs-only verdict, 24 cases) → govulncheck. A separate `design copies` job runs `make design-sync-check` and skips with a notice until the `DESIGN_REPO_TOKEN` secret exists.
 - **`docs.yml`** — on changes to `ARCHITECTURE.md` or `docs/architecture/**`: the diagram check (`scripts/docs_check.py`), which the skipped quality job does not run on a docs-only change.
 - **`changelog-check.yml`** — fails a PR touching `pkg/`, `go.mod` or `go.sum` without a `CHANGELOG.md` update.
 - **`release.yml`** — tag-triggered (`vX.Y.Z`, `vX.Y.Z-*`, or manual dispatch with a tag), with the same job graph as platform-pgcommon's: **verify** (`verify-release-tag.sh`: a dispatch only from `main` or the tag itself, the tag points at the checkout, the commit is on `origin/main`, its major version matches the module path's `/vN`; `verify-changelog-entry.sh`: a `## [X.Y.Z]` section, which a prerelease may share with its base version) → `validate-test.yml` ∥ `validate-quality.yml` ∥ **API compatibility, blocking** (a non-major release fails on an incompatible exported-API change) ∥ "Build image (cache)" (placeholder) → **Trivy CVE scan** + SBOM and "Smoke tests" (placeholder), both after test + image as in CI; **Build source archive** after both validation gates (pgcommon's "Build binaries") → **GitHub Release**: notes from the changelog section, the archive re-checked against its `.sha256`, `checksums.txt` over the archive and the SBOM, **Cosign keyless-signed** (bundle `checksums.txt.sigstore.json`). pgcommon's "Cross-language compatibility" and "Push image → GHCR" have no counterpart (no CLI, no image).

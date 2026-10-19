@@ -71,7 +71,7 @@ Required checks: "Validate / Test / test" and "Validate / Quality / quality" (jo
 
 ### 3.2 Release state
 
-**v2.0.0** is the current release (2026-10-10, module path `…/workflow-connectors/v2`; tag on `5ef76fa`, moved from `7e3d826` (first run hit Docker Hub's pull rate limit) and `f392b27` before its final release — a published tag is never moved or deleted again; a fix ships as a new PATCH); v1.0.0 (2026-10-09) and `v0.1.0-beta.1` precede it. New changes collect under `CHANGELOG.md` `[Unreleased]`, which is the next **v2.1.0** (new exports; `make api-compat` reports no incompatible change). Process (`VERSIONING.md`): merge to `main` → move `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` → `make ci` → `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → notify `definition_service` and `execution_service` owners for MINOR / MAJOR. Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@vX.Y.Z` with `GOPRIVATE` set. There is no image or binary; the GitHub Release carries a source archive, the SBOM and a Cosign-signed `checksums.txt` (`VERSIONING.md` *Verifying a release*).
+**v2.1.0** is the current release (2026-10-13, tag on `fba27ec`, module path `…/workflow-connectors/v2`; new exports, `make api-compat` reported no incompatible change); **v2.0.0** (2026-10-10, tag on `5ef76fa`, moved from `7e3d826` (first run hit Docker Hub's pull rate limit) and `f392b27` before its final release — a published tag is never moved or deleted again; a fix ships as a new PATCH), v1.0.0 (2026-10-09) and `v0.1.0-beta.1` precede it. New changes collect under `CHANGELOG.md` `[Unreleased]`. Process (`VERSIONING.md`): merge to `main` → move `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` → `make ci` → `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → notify `definition_service` and `execution_service` owners for MINOR / MAJOR. Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@vX.Y.Z` with `GOPRIVATE` set. There is no image or binary; the GitHub Release carries a source archive, the SBOM and a Cosign-signed `checksums.txt` (`VERSIONING.md` *Verifying a release*).
 
 ## 4. Testing Strategy
 
@@ -127,7 +127,7 @@ All tests are in the root module. `make test-unit` needs no Docker; everything t
 | No chat-notify provider configured | chat-notify (not in `registry.All()`: cannot be authored) | `ErrValidation` | permanent |
 | Internal service 2xx with a body over 10 MiB | rest-call | `ErrUpstream` + `ErrTooLarge`, reason "response too large"; output with `status`, `headers`, `method`, `bodyTruncated` | permanent (the call was processed; never `ErrValidation`) |
 
-## 7. Upgrade Notes (v2.0.0 → v2.1.0, `CHANGELOG.md` [Unreleased])
+## 7. Upgrade Notes (v2.0.0 → v2.1.0, `CHANGELOG.md` [2.1.0])
 
 - **Valkey ACL:** the worker's user needs `+asking` (cluster slot migrations); without it a ref operation during a migration fails with `NOPERM` (unknown, not retried). `TestACL_DocumentedRulesSuffice` / `TestCluster_DocumentedACL_Suffices` replay the runbook's rules.
 - **S3:** the document bucket needs `s3:PutObject` and `s3:DeleteObject` under the prefix as well as `s3:ListBucket` (`Store.Check` now probes them); tenant aws-s3 credentials need `s3:ListBucket` for delete to recognise a missing object.

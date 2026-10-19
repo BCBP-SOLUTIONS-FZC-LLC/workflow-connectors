@@ -1,6 +1,7 @@
 # Reusable workflow — quality gate.
 # fmt · tidy · vet · lint (golangci-lint) · arch-lint · docs-check ·
-# CI-script tests · vuln-check · supply-chain checks (SHA-pinned actions).
+# CI-script tests · vuln-check · design copy check (skipped with a notice until
+# DESIGN_REPO_TOKEN exists) · supply-chain checks (SHA-pinned actions).
 # Called by ci.yml and release.yml. Job name must stay "quality" — combined
 # with the caller job's "Validate / Quality" name it produces the required
 # branch-protection check "Validate / Quality / quality".

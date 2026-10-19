@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A check that the documents this repository keeps in the design repository still match their copies there: `make design-sync-check` (`DESIGN_DIR` reads a local checkout, otherwise `GH_TOKEN` reads `Haroon-BCBP/design`) compares the pairs listed in `scripts/design-sync.manifest`, and `make design-sync-check-test` tests the script. The CI step runs when `DESIGN_REPO_TOKEN` is set and says so when it is not.
+
+### Changed
+
+- The README, the operating notes and `.claude/CLAUDE.md` name `v2.1.0` as the current release.
+
+## [2.1.0] - 2026-10-13
+
 Production-readiness fixes from a review of the whole library. New exported API only (no signature changed; `make api-compat` is clean), so the next release is a MINOR. Some inputs that used to be accepted are now refused: read **Changed** before upgrading.
 
 ### Security
@@ -70,7 +80,6 @@ Production-readiness fixes from a review of the whole library. New exported API 
 
 ### Added
 
-- A check that the documents this repository keeps in the design repository still match their copies there: `make design-sync-check` (`DESIGN_DIR` reads a local checkout, otherwise `GH_TOKEN` reads `Haroon-BCBP/design`) compares the pairs listed in `scripts/design-sync.manifest`, and `make design-sync-check-test` tests the script. The CI step runs when `DESIGN_REPO_TOKEN` is set and says so when it is not.
 - **rest-call output `method`**, returned on every result once the request was sent. The worker passes it to `DecideRetry` instead of re-resolving the alias.
 - **`sendintent.Releaser`** (`Release(…) (released bool, err error)`), implemented by `MemoryStore` and `sqlstore.Store`, plus `ErrNotReserved`, `ErrNoToken` and `ReleasedDetail`.
 - **`PruneIntents(ctx, olderThan, batch)`** on both send-intent stores, plus `ErrPruneArgs`. Pruning a key reopens its duplicate window.
