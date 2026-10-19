@@ -1,7 +1,6 @@
 # Reusable workflow — quality gate.
 # fmt · tidy · vet · lint (golangci-lint) · arch-lint · docs-check ·
-# CI-script tests · vuln-check · design copy check (skipped with a notice until
-# DESIGN_REPO_TOKEN exists) · supply-chain checks (SHA-pinned actions).
+# CI-script tests · vuln-check · supply-chain checks (SHA-pinned actions).
 # Called by ci.yml and release.yml. Job name must stay "quality" — combined
 # with the caller job's "Validate / Quality" name it produces the required
 # branch-protection check "Validate / Quality / quality".
@@ -33,9 +32,6 @@ name: Validate / Quality
         required: false
       CI_REPO_READ_TOKEN:
         description: 'Checkout of a private repository (github.token is the fallback)'
-        required: false
-      DESIGN_REPO_TOKEN:
-        description: 'Read access to the design repository, for the design copy check (the check is skipped without it)'
         required: false
 
 permissions:
@@ -170,26 +166,3 @@ jobs:
             exit 1
           fi
 
-  design-sync:
-    name: design copies
-    if: ${{ !inputs.skip }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          persist-credentials: false
-
-      # Each document kept in the design repository too must still match it. That repository is not in
-      # this organisation, so the step compares only when DESIGN_REPO_TOKEN is set.
-      - name: Design copy check
-        env:
-          DESIGN_REPO_TOKEN: ${{ secrets.DESIGN_REPO_TOKEN }}
-        run: |
-          if [ -z "$DESIGN_REPO_TOKEN" ]; then
-            echo "::notice::DESIGN_REPO_TOKEN is not set, so the design copies are not compared"
-            exit 0
-          fi
-          GH_TOKEN="$DESIGN_REPO_TOKEN" make design-sync-check

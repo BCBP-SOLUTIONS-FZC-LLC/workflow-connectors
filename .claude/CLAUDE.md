@@ -28,7 +28,7 @@ make tidy-check        # fail if either go.mod/go.sum is not tidy (CI, pre-commi
 make fmt / fmt-check   # gofmt -w / verify (mirrors CI)
 make vet / make lint   # default build + a second pass with every test build tag (ALL_TEST_TAGS = integration)
 make arch-lint         # go-arch-lint v1.15.0 (installed into ~/.cache/workflow-connectors/go-arch-lint/<ver>, version verified; never PATH) against .go-arch-lint.yml
-make design-sync-check # documents kept in the design repository equal their copies (DESIGN_DIR=<checkout>, or GH_TOKEN reads Haroon-BCBP/design; CI skips it with a notice until DESIGN_REPO_TOKEN exists); design-sync-check-test is its own test
+make design-sync-check # documents kept in the design repository equal their copies (DESIGN_DIR=<checkout>, or GH_TOKEN reads Haroon-BCBP/design; local only, CI does not read the personal design repository); design-sync-check-test is its own test
 make docs-check        # ARCHITECTURE.md mermaid blocks identical to docs/architecture/mermaid/*.mmd (same as CI)
 make docs-compile      # the worker skeleton in docs/integration/connector-worker.md compiles + vets (scripts/docs_compile.sh, same as CI)
 make ci-scripts-test   # detect-changes.sh regression tests (scratch git repos; same as CI)

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A check that the documents this repository keeps in the design repository still match their copies there: `make design-sync-check` (`DESIGN_DIR` reads a local checkout, otherwise `GH_TOKEN` reads `Haroon-BCBP/design`) compares the pairs listed in `scripts/design-sync.manifest`, and `make design-sync-check-test` tests the script. The CI step runs when `DESIGN_REPO_TOKEN` is set and says so when it is not.
+- A check that the documents this repository keeps in the design repository still match their copies there: `make design-sync-check` (`DESIGN_DIR` reads a local checkout, otherwise `GH_TOKEN` reads `Haroon-BCBP/design`) compares the pairs listed in `scripts/design-sync.manifest`, and `make design-sync-check-test` tests the script. CI does not run it: the design repository is a personal repository that CI does not read, so the check runs locally only.
 
 ### Changed
 
