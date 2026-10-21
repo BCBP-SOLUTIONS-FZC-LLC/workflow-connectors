@@ -214,7 +214,7 @@ require (
 )
 ```
 
-The module requires `go 1.26.9`. The AWS SDK's `config` package is only an indirect dependency: clients are built from `aws.Config` literals holding the tenant's values (§8.3), never from the worker's AWS environment.
+The module requires `go 1.26.10`. The AWS SDK's `config` package is only an indirect dependency: clients are built from `aws.Config` literals holding the tenant's values (§8.3), never from the worker's AWS environment.
 
 `golangci-lint` is pinned in a separate tools module (`tools/go.mod`, run as `go tool -modfile=tools/go.mod golangci-lint`) so its dependencies never enter a consumer's module graph, and `govulncheck` and `go-arch-lint` are pinned `go run`/`go install` versions — none is a runtime dependency. There is **no** dependency on an OpenBao client or the Temporal SDK. The only `platform-*` module is `platform-pgcommon/v2`; the Valkey client (go-redis) is confined to `docref/valkeystore`.
 
@@ -1586,6 +1586,7 @@ None of the items below is an open design question on this side — each is a na
 | 8.12 | 2026-10-02 | **No call-pool step** (§S3). A connector stage's input/output mapping is described by the call step's own mapping; the call-pool step is gone from the plan (workflow-models LLD rev 2.15). |
 | 8.13 | 2026-10-07 | **A connector always uses the tenant's stored credential; a diagram never names one (§S6.2, §S8, the authoring contract).** The worker had required an authored secret-reference to equal the task's own credential path, which made the authored value a selector with nothing to choose. It now reads each secret field the registry declares for the connector type from `connectors/<task tenant>/<connector type>/<field>`, discards any value a plan still carries for such a field, leaves out a field with no stored credential for the connector to refuse by its own validation, and fails the task on any other read failure; `secret_ref_invalid` is no longer raised for a path a task names. Definition refuses a connector input whose target is a secret field (`CONNECTOR_SECRET_AUTHORED`). An input's `source` is `=name` for an instance variable or any other text for a literal, and an output's `source` names a key of the connector's result with or without `=` (workflow-models LLD rev 2.16). |
 | 8.14 | 2026-10-08 | **The worker no longer resolves an actor (§S6.5 step 0).** Execution names the tenant's automation principal itself, from the identity subsystem, when it puts the task on the stream and again on each callback, so the callbacks carry no actor and the worker's per-tenant actor map is gone. A tenant with no principal is refused before the entry reaches the stream, so the connector never runs for it (execution LLD rev 1.70). |
+| 8.15 | 2026-10-21 | **The module requires Go 1.26.10** (§3). `govulncheck` reports GO-2026-6809 in `crypto/x509` on 1.26.9, fixed in 1.26.10, so the `go` directive and the worker integration note name 1.26.10. No behaviour change. |
 
 ## S-Appendix — BPMN Authoring Reference (for UI Implementers)
 

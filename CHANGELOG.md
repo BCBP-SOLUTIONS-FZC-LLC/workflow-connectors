@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The module requires Go 1.26.10: `govulncheck` reports GO-2026-6809 (`crypto/x509`) on 1.26.9. The worker integration note and LLD rev 8.15 follow.
 - The README, the operating notes and `.claude/CLAUDE.md` name `v2.1.0` as the current release.
 
 ## [2.1.0] - 2026-10-13

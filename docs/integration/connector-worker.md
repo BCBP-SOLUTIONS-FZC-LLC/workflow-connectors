@@ -28,7 +28,7 @@ go get github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2@v2.0.1
 go mod tidy
 ```
 
-- **Go 1.26.9 or newer.** This module's `go` directive is `1.26.9` (standard-library security fixes), so the worker's `go.mod` must say at least that.
+- **Go 1.26.10 or newer.** This module's `go` directive is `1.26.10` (standard-library security fixes), so the worker's `go.mod` must say at least that.
 - **platform-pgcommon v2 (v2.0.1 or newer).** The document registry and send-intent stores take a `*pgcommon.Pool` from v2. `execution_service` is on v2.0.1. v2.0.1 is the minimum: the stores rely on its transaction timeouts.
 - **Import path `…/workflow-connectors/v2/pkg/…`.** v1.0.0 import paths have no `/v2` and do not compile against v2.
 - **Private modules in CI and Docker builds.** Both modules are private: the worker's image build needs a token for `github.com/BCBP-SOLUTIONS-FZC-LLC` (for example a `GO_PRIVATE_TOKEN` build secret, as the IAM services use).
@@ -195,7 +195,7 @@ Classify only with `connectors.ClassOf`, `IsTransient`, `IsPermanent` or `Decide
 
 Before go-live, and after every library upgrade (read the `CHANGELOG.md` sections crossed):
 
-- [ ] Worker `go.mod`: `workflow-connectors/v2` at the release tag, `platform-pgcommon/v2` v2.0.1+, `go 1.26.9`+.
+- [ ] Worker `go.mod`: `workflow-connectors/v2` at the release tag, `platform-pgcommon/v2` v2.0.1+, `go 1.26.10`+.
 - [ ] Migrations ran over a direct connection; the three tables and both `*_migrations` tables exist.
 - [ ] Runtime pool goes through PgBouncer with `PG_BOUNCER_MODE=true`, `PG_STATEMENT_TIMEOUT` and `PG_LOCK_TIMEOUT` set.
 - [ ] Startup fails when Valkey has `appendonly no`, and when the S3 role lacks `s3:ListBucket` (try both in staging).
