@@ -296,7 +296,7 @@ func restCallTo(t *testing.T, handler http.HandlerFunc, ep aliasconfig.Endpoint,
 	})
 	require.NoError(t, err)
 	input["endpointAlias"] = "svc"
-	out, err := all[registry.TypeRestCall].Execute(connectors.WithDepartments(context.Background(), []string{"dept:a"}), input)
+	out, err := all[registry.TypeRestCall].Execute(connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub"), input)
 	return produced{out, err}
 }
 
@@ -372,7 +372,7 @@ var producedRows = []producedRow{
 			srv := httptest.NewServer(http.HandlerFunc(oversized))
 			t.Cleanup(srv.Close)
 			q := sqlquery.New(aliasconfig.Config{SQLQuery: []aliasconfig.Query{{Alias: "q", BaseURL: srv.URL, Path: "/q", QueryID: "q"}}}, nil, "test-token")
-			out, err := q.Execute(connectors.WithDepartments(context.Background(), []string{"dept:a"}), map[string]any{"queryAlias": "q"})
+			out, err := q.Execute(connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "q"})
 			return produced{out, err}
 		},
 		class: connectors.ClassPermanent, reason: shared.ReasonResponseTooLarge, rule: "unknown connector type",
@@ -382,7 +382,7 @@ var producedRows = []producedRow{
 		name: "sql-query non-list params", connectorType: registry.TypeSQLQuery,
 		produce: func(t *testing.T) produced {
 			q := sqlquery.New(aliasconfig.Config{SQLQuery: []aliasconfig.Query{{Alias: "q", BaseURL: "http://127.0.0.1:1", Path: "/q", QueryID: "q", ParamCount: 1}}}, nil, "test-token")
-			out, err := q.Execute(connectors.WithDepartments(context.Background(), []string{"dept:a"}), map[string]any{"queryAlias": "q", "params": "1"})
+			out, err := q.Execute(connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "q", "params": "1"})
 			return produced{out, err}
 		},
 		class: connectors.ClassPermanent, reason: "invalid input", rule: "unknown connector type", is: []error{connectors.ErrValidation},

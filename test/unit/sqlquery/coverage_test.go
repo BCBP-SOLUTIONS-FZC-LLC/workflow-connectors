@@ -19,7 +19,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2/pkg/registry"
 )
 
-var deptCtx = shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+var deptCtx = shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

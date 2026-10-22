@@ -172,7 +172,7 @@ func TestIT06_RestCallRecoversForGET_NotForPOST(t *testing.T) {
 		require.NoError(t, err)
 		return byType[registry.TypeRestCall]
 	}
-	ctx := connectors.WithDepartments(context.Background(), []string{"dept:reviewer"})
+	ctx := connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 
 	get := runTask(ctx, newConn(http.MethodGet), http.MethodGet, map[string]any{"endpointAlias": "svc"}, maxAttempts)
 	require.Len(t, get, 3)

@@ -95,7 +95,7 @@ func TestNew_FragmentAliasRefused_FixedQueryKeyEnforced(t *testing.T) {
 	cfg.Aliases.RestCall[0].PathTemplate = "/users?role=user"
 	all, err := connectors.New(cfg)
 	require.NoError(t, err)
-	ctx := connectors.WithDepartments(context.Background(), []string{"d:approver"})
+	ctx := connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 
 	_, err = all[registry.TypeRestCall].Execute(ctx, map[string]any{
 		"endpointAlias": "users",

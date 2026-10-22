@@ -66,7 +66,7 @@ func TestREG02_RestCallRedirect_NotFollowed_Permanent(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked.Add(1) }))
 	t.Cleanup(target.Close)
 
-	ctx := connectors.WithDepartments(context.Background(), []string{"dept:reviewer"})
+	ctx := connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	_, err := restCall(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}, http.MethodGet, ctx)
@@ -161,7 +161,7 @@ func TestREG08_RestCallWithoutDepartments_NoRequest(t *testing.T) {
 // denial looped; only transient errors are retried now.
 func TestREG09_UpstreamPermanentFailure_DoesNotLoop(t *testing.T) {
 	t.Parallel()
-	ctx := connectors.WithDepartments(context.Background(), []string{"dept:reviewer"})
+	ctx := connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -237,7 +237,7 @@ func TestREG11_InternalCall_IgnoresHTTPSProxy(t *testing.T) {
 		}}},
 	})
 	require.NoError(t, err)
-	ctx := connectors.WithDepartments(context.Background(), []string{"dept:reviewer"})
+	ctx := connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	_, err = all[registry.TypeRestCall].Execute(ctx, map[string]any{"endpointAlias": "svc"})
 
 	require.Error(t, err, "the call went directly to its (unresolvable) host")
@@ -272,7 +272,7 @@ func TestREG12_WrappedDefaultTransport_NewAndExecuteDoNotPanic(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	ctx := connectors.WithDepartments(tenantCtx(), []string{"dept:reviewer"})
+	ctx := connectors.WithActor(tenantCtx(), "principal-sub")
 	out, err := all[registry.TypeRestCall].Execute(ctx, map[string]any{"endpointAlias": "svc"})
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, out["status"])
@@ -358,7 +358,7 @@ func TestREG17_AliasFileWithTrailingDocumentMarker_Loads(t *testing.T) {
 	require.NoError(t, err)
 	all, err := connectors.New(connectors.Config{InternalToken: "test-token", Aliases: cfg})
 	require.NoError(t, err)
-	out, err := all[registry.TypeRestCall].Execute(connectors.WithDepartments(context.Background(), []string{"dept:a"}), map[string]any{"endpointAlias": "svc"})
+	out, err := all[registry.TypeRestCall].Execute(connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"endpointAlias": "svc"})
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, out["status"])
 }

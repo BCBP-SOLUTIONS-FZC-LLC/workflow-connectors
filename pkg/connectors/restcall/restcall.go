@@ -39,7 +39,7 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, fmt.Errorf("%w: %w", shared.ErrValidation, err)
 	}
 
-	departments, err := shared.DepartmentsHeaderValue(ctx)
+	caller, err := shared.CallerHeadersFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func (r Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, err
 	}
 	req.Header.Set(shared.InternalTokenHeader, r.internalToken)
-	req.Header.Set(shared.DepartmentsHeader, departments)
+	caller.Apply(req.Header)
 
 	// From here on every result, failures included, carries the method sent,
 	// so the worker's DecideRetry needs no second alias lookup.

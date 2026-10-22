@@ -8,7 +8,7 @@ import (
 var (
 	ErrValidation = errors.New("connectors: invalid input")
 
-	ErrMissingInternalAuth = errors.New("connectors: missing internal auth context (WithDepartments not called)")
+	ErrMissingInternalAuth = errors.New("connectors: missing internal auth context (WithTenant and WithActor not called)")
 
 	ErrUpstream = errors.New("connectors: upstream call failed")
 )

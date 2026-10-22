@@ -349,7 +349,7 @@ docker-down:
 # -----------------------------
 
 .PHONY: ci
-ci: tidy-check fmt-check vet lint arch-lint docs-check docs-compile ci-scripts-test test-ci build
+ci: design-sync-check-test tidy-check fmt-check vet lint arch-lint docs-check docs-compile ci-scripts-test test-ci build
 
 # -----------------------------
 # COVERAGE
@@ -374,3 +374,13 @@ cover-func: test-ci
 clean:
 	rm -rf .coverage
 	rm -f coverage.out coverage.html
+
+.PHONY: design-sync-check design-sync-check-test
+
+## design-sync-check: Fail if a document kept in the design repository too differs (DESIGN_DIR=<checkout> reads it locally, else GH_TOKEN reads Haroon-BCBP/design)
+design-sync-check:
+	@scripts/design-sync-check.sh
+
+## design-sync-check-test: Test the design-sync-check script against throwaway directories
+design-sync-check-test:
+	@scripts/design-sync-check_test.sh

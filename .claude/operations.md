@@ -8,7 +8,7 @@ The library has no process, server or configuration of its own; "operations" her
 
 - **Credentials arrive resolved.** The worker resolves every `secret_ref` field (`registry.Field.IsSecretRef()`) from OpenBao for the job's own tenant and passes the value in `Execute`'s input. The library never sees an OpenBao path.
 - **Credentials live only in memory**, in the storage / send-email client caches, keyed by a SHA-256 of every credential field (plus bucket or sender), capped at 256 entries. A retired client is closed once its last call finishes. Credentials are never logged, returned in outputs or errors, or persisted.
-- **Internal calls carry caller identity:** `x-internal-token` (`Config.InternalToken`, required by `New`) and `x-departments` (from `WithDepartments`); missing or malformed departments fail before any request.
+- **Internal calls carry caller identity:** `x-internal-token` (`Config.InternalToken`, required by `New`), `x-tenant-id` (`WithTenant`), `x-user-id` (`WithActor`, the tenant's automation principal) and, optionally, `x-workflow-department-id` (`WithLaneDepartment`); a missing tenant or actor, or a CR/LF in any of them, fails before any request. No `x-departments` is sent.
 
 ### 1.2 Guards in the code
 
@@ -73,7 +73,7 @@ Every job runs on `ubuntu-24.04` (pinned, never `ubuntu-latest`). Required check
 
 ### 3.2 Release state
 
-**v2.0.0** is the current release (2026-10-10, module path `…/workflow-connectors/v2`; tag on `5ef76fa`, moved from `7e3d826` (first run hit Docker Hub's pull rate limit) and `f392b27` before its final release — a published tag is never moved or deleted again; a fix ships as a new PATCH); v1.0.0 (2026-10-09) and `v0.1.0-beta.1` precede it. `CHANGELOG.md` `[2.1.0]` (cut 2026-10-13, tagged after merge) is the next **v2.1.0** (new exports; `make api-compat` reports no incompatible change). Process (`VERSIONING.md`): merge to `main` → move `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` → `make ci` → `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → notify `definition_service` and `execution_service` owners for MINOR / MAJOR. Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@vX.Y.Z` with `GOPRIVATE` set. There is no image or binary; the GitHub Release carries a source archive, the SBOM and a Cosign-signed `checksums.txt` (`VERSIONING.md` *Verifying a release*).
+**v2.1.0** is the current release (2026-10-13, tag on `fba27ec`, module path `…/workflow-connectors/v2`; new exports, `make api-compat` reported no incompatible change); **v2.0.0** (2026-10-10, tag on `5ef76fa`, moved from `7e3d826` (first run hit Docker Hub's pull rate limit) and `f392b27` before its final release — a published tag is never moved or deleted again; a fix ships as a new PATCH), v1.0.0 (2026-10-09) and `v0.1.0-beta.1` precede it. New changes collect under `CHANGELOG.md` `[Unreleased]`. Process (`VERSIONING.md`): merge to `main` → move `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` → `make ci` → `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → notify `definition_service` and `execution_service` owners for MINOR / MAJOR. Consumers: `go get github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2@vX.Y.Z` with `GOPRIVATE` set. There is no image or binary; the GitHub Release carries a source archive, the SBOM and a Cosign-signed `checksums.txt` (`VERSIONING.md` *Verifying a release*).
 
 ## 4. Testing Strategy
 

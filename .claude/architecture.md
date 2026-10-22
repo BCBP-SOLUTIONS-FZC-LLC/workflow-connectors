@@ -16,7 +16,7 @@ pkg/
     │                             #         ChatNotifyClient, SendIntents, DocRefs
     ├── errors.go                 # re-exported sentinels, ErrorClass, ClassOf, IsTransient, IsPermanent, IsRetryable
     ├── retry.go                  # RetryDecision, DecideRetry, AutoRetryAllowed
-    ├── internalauth.go           # WithTenant / TenantFromContext, WithDepartments / DepartmentsFromContext
+    ├── internalauth.go           # WithTenant, WithActor, WithLaneDepartment (and the inert WithDepartments)
     ├── shared/                   # leaf: errors + classes, delivery sentinels, limits and HTTP clients, field and
     │                             #       HTTP helpers, ClientCache, tenant/departments context, Google key check
     ├── aliasconfig/              # rest-call / sql-query alias schema, Load + Validate, ResolveEndpoint / ResolveQuery
@@ -112,7 +112,7 @@ Full guide: [`docs/integration/connector-worker.md`](../docs/integration/connect
 3. Fail-fast checks: `valkeystore.CheckDurability(ctx, valkey)` (`*DurabilityError` first, then `ErrConfigUnavailable`), `valkeystore.Options.Validate()`, and `s3content.New(s3Client, bucket).Check(ctx, "docrefs/")` (bucket reachable, `s3:ListBucket`, `s3:PutObject`, `s3:DeleteObject`). The Valkey ACL user needs the runbook's rules, including `+asking` on a cluster.
 4. `docref.NewService(valkeystore.New(valkey, valkeystore.Options{}), content, docref.WithKeyPrefix("docrefs/"))`.
 5. `connectors.New(connectors.Config{…})` (fails on an empty `InternalToken` or invalid `Aliases`) with every registry provider: `gocloud.NewProvider` (aws-s3, azure-blob, gcp-gcs), `googledrive.NewProvider(documentsql.New(pool))`, `sendgrid.NewProvider`, `ses.NewProvider`, `msgraph.NewProvider`, `gmail.NewProvider`; `SendIntents: intentsql.New(pool)`; `DocRefs`; `InternalToken`; `Aliases` from `aliasconfig.Load`.
-6. Per task: `connectors.WithTenant`, `connectors.WithDepartments` (rest-call), resolved `secret_ref` values in the input, a timeout below `documents.DefaultLease` (15 min), `Execute`, then `connectors.DecideRetry` before any automatic retry (for rest-call pass the output's `method`).
+6. Per task: `connectors.WithTenant`, `connectors.WithActor` and `connectors.WithLaneDepartment` (rest-call), resolved `secret_ref` values in the input, a timeout below `documents.DefaultLease` (15 min), `Execute`, then `connectors.DecideRetry` before any automatic retry (for rest-call pass the output's `method`).
 7. Operations: `ResetClients()` (storage, send-email) after credential rotation; scheduled `documentsql.Store.PruneAttempts` and `intentsql.Store.PruneIntents` (retention longer than any redelivery window); `pool.DrainAndClose` on shutdown.
 
 ### `workflow-definition-service` (compile side)
@@ -121,4 +121,4 @@ Imports only `pkg/registry`: `registry.All()` for the authorable catalogue (stor
 
 ### Internal services called by `rest-call` / `sql-query`
 
-They receive `x-internal-token` (`Config.InternalToken`) and `x-departments` (comma-joined `dept_uuid:role` pairs from `WithDepartments`) on every request; they must authorize from those headers.
+They receive `x-internal-token` (`Config.InternalToken`), `x-tenant-id` and `x-user-id` (the tenant's automation principal) on every request, and `x-workflow-department-id` as context; no department grant is sent, so they apply their own rule for automation callers.

@@ -24,8 +24,8 @@ func aliasFor(baseURL, pathTemplate string) aliasconfig.Config {
 	}}
 }
 
-func deptCtx() context.Context {
-	return shared.WithDepartments(context.Background(), []string{"d:approver"})
+func callerCtx() context.Context {
+	return shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 }
 
 func TestRestCall_Redirect_NotFollowed_TokenNeverLeaves(t *testing.T) {
@@ -37,7 +37,7 @@ func TestRestCall_Redirect_NotFollowed_TokenNeverLeaves(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		leakedToken = r.Header.Get(shared.InternalTokenHeader)
-		leakedDepts = r.Header.Get(shared.DepartmentsHeader)
+		leakedDepts = r.Header.Get(shared.UserIDHeader)
 	}))
 	defer external.Close()
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +46,7 @@ func TestRestCall_Redirect_NotFollowed_TokenNeverLeaves(t *testing.T) {
 	defer internal.Close()
 
 	conn := restcall.New(aliasFor(internal.URL, "/x"), &http.Client{}, "secret-token")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrUpstream))
@@ -67,7 +67,7 @@ func TestRestCall_NumericPathAndQueryParams(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/applications/{id}"), nil, "t")
-	_, err := conn.Execute(deptCtx(), map[string]any{
+	_, err := conn.Execute(callerCtx(), map[string]any{
 		"endpointAlias": "a",
 		"pathParams":    map[string]any{"id": float64(1234567)},
 		"queryParams":   map[string]any{"page": float64(3)},
@@ -81,7 +81,7 @@ func TestRestCall_UnknownAlias_IsValidationError(t *testing.T) {
 	t.Parallel()
 
 	conn := restcall.New(aliasconfig.Config{}, nil, "t")
-	_, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "missing"})
+	_, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "missing"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrValidation))
 	assert.True(t, errors.Is(err, aliasconfig.ErrUnknownAlias))
@@ -95,7 +95,7 @@ func TestRestCall_TransportError_IsUpstream(t *testing.T) {
 	srv.Close()
 
 	conn := restcall.New(aliasFor(url, "/x"), nil, "t")
-	_, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	_, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrUpstream))
 }
@@ -117,7 +117,7 @@ func TestRestCall_OversizedResponse_IsPermanentNotValidation(t *testing.T) {
 		{Alias: "a", Method: "post", BaseURL: srv.URL, PathTemplate: "/x"},
 	}}
 	conn := restcall.New(aliases, nil, "t")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, shared.ErrValidation), "the input was valid")
 	assert.ErrorIs(t, err, shared.ErrTooLarge)
@@ -147,7 +147,7 @@ func TestRestCall_ResponseReadError_KeepsStatusAndMethod(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, shared.ErrUpstream)
 	assert.Equal(t, http.StatusOK, out["status"])
@@ -171,16 +171,16 @@ func TestRestCall_OutputCarriesMethod(t *testing.T) {
 	}}
 	conn := restcall.New(aliases, nil, "t")
 
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "ok"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "ok"})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPut, out["method"])
 
-	out, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "fail"})
+	out, err = conn.Execute(callerCtx(), map[string]any{"endpointAlias": "fail"})
 	require.Error(t, err)
 	assert.Equal(t, http.MethodPatch, out["method"])
 
 	srv.Close() // connection refused from now on
-	out, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "ok"})
+	out, err = conn.Execute(callerCtx(), map[string]any{"endpointAlias": "ok"})
 	require.Error(t, err)
 	assert.Equal(t, map[string]any{"method": http.MethodPut}, out)
 	assert.True(t, shared.IsTransient(err))
@@ -195,7 +195,7 @@ func TestRestCall_SetCookieNotReturned(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.NoError(t, err)
 	assert.NotContains(t, out["headers"], "Set-Cookie")
 }
@@ -224,7 +224,7 @@ func TestRestCall_UnvalidatedFragmentAlias_IsRefused(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	conn := restcall.New(aliasFor(srv.URL, "/users#?role=user"), nil, "t")
-	_, err := conn.Execute(deptCtx(), map[string]any{
+	_, err := conn.Execute(callerCtx(), map[string]any{
 		"endpointAlias": "a",
 		"queryParams":   map[string]any{"role": "admin"},
 	})

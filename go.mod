@@ -1,6 +1,6 @@
 module github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2
 
-go 1.26.9
+go 1.26.10
 
 require (
 	cloud.google.com/go/storage v1.61.3

@@ -35,7 +35,7 @@ func TestRestCall_PathCannotChangeHost(t *testing.T) {
 
 	for _, tmpl := range []string{"@" + evilHost + "/steal", "{p}/steal"} {
 		conn := restcall.New(aliasFor("http://svc.internal", tmpl), nil, "secret")
-		_, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"p": "@" + evilHost}})
+		_, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"p": "@" + evilHost}})
 		require.ErrorIs(t, err, shared.ErrValidation, tmpl)
 		assert.True(t, shared.IsPermanent(err))
 	}
@@ -49,7 +49,7 @@ func TestRestCall_DotSegmentPathParam_IsRejected(t *testing.T) {
 	srv, hits := countingServer(t)
 	conn := restcall.New(aliasFor(srv.URL, "/tenants/t1/items/{id}"), nil, "t")
 	for _, v := range []string{".", "..", ""} {
-		_, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"id": v}})
+		_, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"id": v}})
 		require.ErrorIs(t, err, shared.ErrValidation, "%q", v)
 	}
 	assert.Zero(t, hits.Load())
@@ -63,11 +63,11 @@ func TestRestCall_QueryParamCannotOverrideTemplate(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/items?scope=own"), nil, "t")
-	_, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "queryParams": map[string]any{"scope": "all"}})
+	_, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a", "queryParams": map[string]any{"scope": "all"}})
 	require.ErrorIs(t, err, shared.ErrValidation)
 	assert.Nil(t, gotQuery.Load(), "nothing sent")
 
-	_, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "queryParams": map[string]any{"page": 2.0}})
+	_, err = conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a", "queryParams": map[string]any{"page": 2.0}})
 	require.NoError(t, err)
 	assert.Equal(t, "scope=own&page=2", gotQuery.Load())
 }
@@ -84,7 +84,7 @@ func TestRestCall_ErrorStatus_OversizedBody_ClassifiedByStatus(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.ErrorIs(t, err, shared.ErrUpstream)
 	assert.NotErrorIs(t, err, shared.ErrValidation)
 	assert.True(t, shared.IsTransient(err))
@@ -104,7 +104,7 @@ func TestRestCall_ErrorStatus_BodyReadFailure_ClassifiedByStatus(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.ErrorIs(t, err, shared.ErrUpstream)
 	assert.True(t, shared.IsTransient(err))
 	assert.Equal(t, "slow down", out["body"])
@@ -120,7 +120,7 @@ func TestRestCall_ErrorStatus_SmallBody_IsDecodedAndNotTruncated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := restcall.New(aliasFor(srv.URL, "/x"), nil, "t").Execute(deptCtx(), map[string]any{"endpointAlias": "a"})
+	out, err := restcall.New(aliasFor(srv.URL, "/x"), nil, "t").Execute(callerCtx(), map[string]any{"endpointAlias": "a"})
 	require.ErrorIs(t, err, shared.ErrUpstream)
 	assert.True(t, shared.IsPermanent(err))
 	assert.Equal(t, map[string]any{"code": json.Number("404")}, out["body"])
@@ -139,24 +139,23 @@ func TestRestCall_LargeIntegers_StayExact(t *testing.T) {
 	defer srv.Close()
 
 	conn := restcall.New(aliasFor(srv.URL, "/items/{id}"), nil, "t")
-	out, err := conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"id": "1"}})
+	out, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"id": "1"}})
 	require.NoError(t, err)
 	id := out["body"].(map[string]any)["id"]
 	assert.Equal(t, json.Number("9007199254740993"), id)
 
-	_, err = conn.Execute(deptCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"id": id}})
+	_, err = conn.Execute(callerCtx(), map[string]any{"endpointAlias": "a", "pathParams": map[string]any{"id": id}})
 	require.NoError(t, err)
 	assert.Equal(t, "/items/9007199254740993", gotPath.Load())
 }
 
-// Departments that would forge or break x-departments fail closed.
-func TestRestCall_UnusableDepartments_FailClosed(t *testing.T) {
+func TestRestCall_UnusableCallerIdentity_FailsClosed(t *testing.T) {
 	t.Parallel()
 	srv, hits := countingServer(t)
 	conn := restcall.New(aliasFor(srv.URL, "/x"), nil, "t")
-	for _, depts := range [][]string{{}, {"d1:viewer,d2:admin"}, {"d1:viewer\r\nx-internal-token: forged"}, {""}} {
-		_, err := conn.Execute(shared.WithDepartments(context.Background(), depts), map[string]any{"endpointAlias": "a"})
-		require.ErrorIs(t, err, shared.ErrMissingInternalAuth, "%q", depts)
+	for _, actor := range []string{"", "p\r\nx-internal-token: forged"} {
+		_, err := conn.Execute(shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), actor), map[string]any{"endpointAlias": "a"})
+		require.ErrorIs(t, err, shared.ErrMissingInternalAuth, "%q", actor)
 		assert.True(t, shared.IsPermanent(err))
 	}
 	assert.Zero(t, hits.Load())

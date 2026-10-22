@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `connectors.WithActor` and `connectors.WithLaneDepartment` (and their readers), and `shared.CallerHeadersFromContext`: `rest-call` and `sql-query` send `x-tenant-id` (from `WithTenant`), `x-user-id` (the actor, the tenant's automation principal) and, when set, `x-workflow-department-id` (the lane department, context only), per IAM's header contract for calls to alias targets (LLD rev 1.21).
+- A check that the documents this repository keeps in the design repository still match their copies there: `make design-sync-check` (`DESIGN_DIR` reads a local checkout, otherwise `GH_TOKEN` reads `Haroon-BCBP/design`) compares the pairs listed in `scripts/design-sync.manifest`, and `make design-sync-check-test` tests the script. CI does not run it: the design repository is a personal repository that CI does not read, so the check runs locally only.
+
+### Changed
+
+- `rest-call` and `sql-query` no longer send `x-departments`: the automation principal holds no department role, so any value was an invented grant. `ErrMissingInternalAuth` now means a missing tenant or actor (or a CR/LF in the caller identity). `WithDepartments`, `DepartmentsFromContext`, `shared.DepartmentsHeader` and `shared.DepartmentsHeaderValue` stay exported for compatibility and no longer affect a request.
+- The module requires Go 1.26.10: `govulncheck` reports GO-2026-6809 (`crypto/x509`) on 1.26.9. The worker integration note and LLD rev 8.15 follow.
+- The README, the operating notes and `.claude/CLAUDE.md` name `v2.1.0` as the current release.
+
 ## [2.1.0] - 2026-10-13
 
 Production-readiness fixes from a review of the whole library. New exported API only (no signature changed; `make api-compat` is clean), so the next release is a MINOR. Some inputs that used to be accepted are now refused: read **Changed** and **Removed** before upgrading.

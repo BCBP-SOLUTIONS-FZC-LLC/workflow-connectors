@@ -32,7 +32,7 @@ func TestSQLQuery_ErrorStatusReportedBeforeDecode(t *testing.T) {
 	defer srv.Close()
 
 	conn := sqlquery.New(queryAlias(srv.URL), nil, "t")
-	_, err := conn.Execute(shared.WithDepartments(context.Background(), []string{"d:r"}), map[string]any{"queryAlias": "q"})
+	_, err := conn.Execute(shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "q"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrUpstream))
 	assert.Contains(t, err.Error(), "status 503")
@@ -50,7 +50,7 @@ func TestSQLQuery_Redirect_NotFollowed(t *testing.T) {
 	defer internal.Close()
 
 	conn := sqlquery.New(queryAlias(internal.URL), nil, "t")
-	_, err := conn.Execute(shared.WithDepartments(context.Background(), []string{"d:r"}), map[string]any{"queryAlias": "q"})
+	_, err := conn.Execute(shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "q"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrUpstream))
 	assert.False(t, reachedExternal)
@@ -60,7 +60,7 @@ func TestSQLQuery_UnknownAlias_IsValidationError(t *testing.T) {
 	t.Parallel()
 
 	conn := sqlquery.New(aliasconfig.Config{}, nil, "t")
-	_, err := conn.Execute(shared.WithDepartments(context.Background(), []string{"d:r"}), map[string]any{"queryAlias": "nope"})
+	_, err := conn.Execute(shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "nope"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrValidation))
 	assert.True(t, errors.Is(err, aliasconfig.ErrUnknownAlias))
@@ -77,7 +77,7 @@ func TestSQLQuery_PathCannotChangeHost(t *testing.T) {
 	cfg := aliasconfig.Config{SQLQuery: []aliasconfig.Query{{
 		Alias: "q", BaseURL: "http://svc.internal", Path: "@" + strings.TrimPrefix(evil.URL, "http://") + "/steal", QueryID: "q1",
 	}}}
-	_, err := sqlquery.New(cfg, nil, "secret").Execute(shared.WithDepartments(context.Background(), []string{"d:r"}), map[string]any{"queryAlias": "q"})
+	_, err := sqlquery.New(cfg, nil, "secret").Execute(shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "q"})
 	require.ErrorIs(t, err, shared.ErrValidation)
 	assert.Zero(t, hits.Load())
 }
@@ -90,21 +90,25 @@ func TestSQLQuery_LargeIntegers_StayExact(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := sqlquery.New(queryAlias(srv.URL), nil, "t").Execute(shared.WithDepartments(context.Background(), []string{"d:r"}), map[string]any{"queryAlias": "q"})
+	out, err := sqlquery.New(queryAlias(srv.URL), nil, "t").Execute(shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"queryAlias": "q"})
 	require.NoError(t, err)
 	rows := out["resultSet"].([]map[string]any)
 	assert.Equal(t, json.Number("9007199254740993"), rows[0]["id"])
 	assert.Equal(t, json.Number("12345678901234567890"), rows[0]["amount"])
 }
 
-func TestSQLQuery_UnusableDepartments_FailClosed(t *testing.T) {
+func TestSQLQuery_UnusableCallerIdentity_FailsClosed(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	defer srv.Close()
 
-	for _, depts := range [][]string{{}, {"d1:r,d2:admin"}, {"d1:r\n"}} {
-		_, err := sqlquery.New(queryAlias(srv.URL), nil, "t").Execute(shared.WithDepartments(context.Background(), depts), map[string]any{"queryAlias": "q"})
+	for _, ctx := range []context.Context{
+		context.Background(),
+		shared.WithDepartments(context.Background(), []string{"d1:reviewer"}),
+		shared.WithActor(shared.WithTenant(context.Background(), "t\n"), "principal-sub"),
+	} {
+		_, err := sqlquery.New(queryAlias(srv.URL), nil, "t").Execute(ctx, map[string]any{"queryAlias": "q"})
 		require.ErrorIs(t, err, shared.ErrMissingInternalAuth)
 	}
 	assert.Zero(t, hits.Load())

@@ -165,3 +165,4 @@ jobs:
             echo "::error file=go.mod,title=Vulnerability found::govulncheck detected vulnerabilities — run 'make vuln-check' locally to view details."
             exit 1
           fi
+
