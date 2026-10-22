@@ -65,7 +65,7 @@ func ReadAllLimited(r io.Reader, limit int64, what string) ([]byte, error) {
 // and speaks HTTP/1.1 only.
 //
 // Redirects: Go re-sends custom headers on a redirect, so following one would
-// hand x-internal-token and x-departments to whichever host the response
+// hand x-internal-token and the caller identity to whichever host the response
 // names.
 //
 // HTTP/1.1: Go's HTTP/2 client may replay a request body after a stream
@@ -80,7 +80,7 @@ func ReadAllLimited(r io.Reader, limit int64, what string) ([]byte, error) {
 // owns its protocol choice and must not enable HTTP/2 under it.
 //
 // Proxy: the default transport never uses a proxy. http.DefaultTransport's
-// ProxyFromEnvironment would send x-internal-token and x-departments through
+// ProxyFromEnvironment would send x-internal-token and the caller identity through
 // whatever egress proxy HTTP_PROXY / HTTPS_PROXY name — internal calls go
 // straight to the alias's service. A caller-supplied *http.Transport keeps
 // its own Proxy setting.

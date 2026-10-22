@@ -35,7 +35,7 @@ graph TD
         storage["storage/\nProviderClient port · ProviderConstructor\nfetch / upload / delete · per-credential client cache (256)\nMockStorageClient"]
         sendemail["sendemail/\nProviderClient port · EmailMessage · EmailAttachment\ntemplateless-provider rule · attachments via *docref.Service\nper-sender client cache (256) · MockSendEmailClient"]
         chatnotify["chatnotify/\nProviderClient port · nil client → every call ErrValidation (no real provider yet)"]
-        restcall["restcall/\nalias → internal endpoint · x-internal-token + x-departments"]
+        restcall["restcall/\nalias → internal endpoint · x-internal-token + caller identity"]
         sqlquery["sqlquery/  (not wired into New)\nalias → owning service's query endpoint, never SQL text"]
         docextract["documentextract/  (not wired into New)\nProviderClient port · nil client → ErrValidation"]
     end
@@ -390,15 +390,15 @@ sequenceDiagram
     participant AC as aliasconfig.Config (by value, from New)
     participant S as Internal service (e.g. Tender API)
 
-    W ->> W: ctx = connectors.WithDepartments(ctx, ["{dept_uuid}:{role}", ...])
+    W ->> W: ctx = WithTenant(ctx, tenant) · WithActor(ctx, principal) · WithLaneDepartment(ctx, lane)
     W ->>+ R: Execute(ctx, {endpointAlias, pathParams, queryParams, body})
     Note over R: endpointAlias required → else ErrValidation
     R ->>+ AC: ResolveEndpoint(alias)
     AC -->>- R: Endpoint{Method, BaseURL, PathTemplate, Timeout}<br/>or aliasconfig.ErrUnknownAlias
-    Note over R: no usable departments in ctx → ErrMissingInternalAuth (fails closed, nothing sent)<br/>{placeholders} filled with url.PathEscape'd pathParams (no "", ".", ".."),<br/>URL must keep BaseURL's scheme + host, no userinfo
-    R ->>+ S: METHOD BaseURL+path?query<br/>x-internal-token: Config.InternalToken<br/>x-departments: comma-joined<br/>(context timeout = Endpoint.Timeout when set)
+    Note over R: no tenant or actor in ctx, or a CR/LF in any identity value → ErrMissingInternalAuth (fails closed, nothing sent)<br/>{placeholders} filled with url.PathEscape'd pathParams (no "", ".", ".."),<br/>URL must keep BaseURL's scheme + host, no userinfo
+    R ->>+ S: METHOD BaseURL+path?query<br/>x-internal-token: Config.InternalToken<br/>x-tenant-id · x-user-id · x-workflow-department-id<br/>(context timeout = Endpoint.Timeout when set)
     S -->>- R: status · headers · body (JSON decoded, numbers as json.Number, when Content-Type has "json")
-    Note over R,S: client never follows redirects — a 3xx is returned, not chased,<br/>so the two headers never reach another host — HTTP/1.1 only,<br/>each call bounded by Endpoint.Timeout, else 30 s (shared.CallTimeout)
+    Note over R,S: client never follows redirects — a 3xx is returned, not chased,<br/>so the headers never reach another host — HTTP/1.1 only,<br/>each call bounded by Endpoint.Timeout, else 30 s (shared.CallTimeout)
     alt status < 300
         R -->> W: {status, headers, body}
     else status >= 300
@@ -407,7 +407,7 @@ sequenceDiagram
 ```
 
 - **`x-internal-token`** — `Config.InternalToken`, the platform's service-to-service token. `New` refuses to build without it.
-- **`x-departments`** — the acting user's `dept_uuid:role` pairs, set by the worker with `connectors.WithDepartments`. With none in the context (or an empty list, or a department that is empty or contains `,`, CR or LF — which would forge another department or break the header), both connectors return `ErrMissingInternalAuth` (permanent) **before** any request is built — they fail closed.
+- **`x-tenant-id`, `x-user-id`, `x-workflow-department-id`** — the caller identity: the job's tenant (`connectors.WithTenant`), the tenant's automation principal (`connectors.WithActor`) and, optionally, the stage's lane department (`connectors.WithLaneDepartment`), which is context and grants nothing. Without a tenant or an actor, or with any value containing CR or LF, both connectors return `ErrMissingInternalAuth` (permanent) **before** any request is built — they fail closed. No `x-departments` grant is ever sent: the automation principal holds no department role (IAM HLD §5.8).
 - **Aliases are captured by value at `New` time.** The worker fetches the registry from `definition_service` once at startup (LLD §S10 Decision #21); there is no hot reload. The internal-host allowlist on `BaseURL` is enforced where aliases are written, in `definition_service`, because this library takes no deployment configuration.
 - **`sql-query`** posts `{queryId, params}` to the owning service's own query endpoint, which binds parameters against its own pre-registered, read-only statement. It never holds a database connection and never sees SQL text (LLD §S10 Decision #17). It checks `params` length against the alias's `paramCount` when that is positive.
 
@@ -436,7 +436,7 @@ The connectors returned by `New` are shared across every in-flight call in the w
 | `ErrNotDelivered` | send-email only: the provider definitively did not accept the message (4xx, or the request never left) | Transient (429, 408, throttling code, DNS, connection failure) or permanent (other 4xx) |
 | `ErrDeliveryUnknown` | send-email only: the provider may have accepted it (timeout or reset after sending, 5xx, crash) | Unknown |
 | `ErrUpstream` | The provider or internal service failed: an SDK, network or timeout error (never for send-email), a `>= 300` status from an internal service, or an undecodable response | Transient, permanent or unknown, by provider mapping |
-| `ErrMissingInternalAuth`, `ErrMissingTenant` | Called without `WithDepartments` / `WithTenant` | Permanent (a worker wiring bug) |
+| `ErrMissingInternalAuth`, `ErrMissingTenant` | Called without `WithTenant` and `WithActor` (`rest-call`, `sql-query`) or `WithTenant` (tenant-scoped calls) | Permanent (a worker wiring bug) |
 
 **Classification (OQ-9).** A class is attached where the provider's error is understood, in the adapter or core that made the call, and read anywhere with `connectors.ClassOf` (also `IsTransient`, `IsPermanent`, `DecideRetry`; there is deliberately no `errors.Is` sentinel per class, which could disagree with `ClassOf`'s precedence):
 
@@ -567,7 +567,7 @@ Before wiring `pkg/connectors` into a worker, or bumping the version a worker pi
 **Per call**
 - [ ] Set `connectors.WithTenant` on every call (document refs, the Drive registry and send intents are scoped by it; without it they fail with `ErrMissingTenant`).
 - [ ] Resolve every `FieldKindSecretRef` field for the job's own tenant immediately before `Execute`, and keep the values in memory only.
-- [ ] For `rest-call` (and `sql-query` once wired), set `connectors.WithDepartments` on the context — otherwise the call fails with `ErrMissingInternalAuth`.
+- [ ] For `rest-call` (and `sql-query` once wired), set `connectors.WithTenant` and `connectors.WithActor` (and `WithLaneDepartment` when the stage has a lane) on the context — otherwise the call fails with `ErrMissingInternalAuth`.
 - [ ] Classify errors with `errors.Is` against `ErrValidation`, `ErrUpstream`, `ErrMissingInternalAuth`, `ErrMissingTenant`, `ErrNotDelivered` and `ErrDeliveryUnknown`, read the retry class only with `connectors.ClassOf` (there are no per-class sentinels), and use `errors.As` for provider-specific errors kept in the chain, `*sendemail.SendError` and `*sendintent.DuplicateRequestError`.
 - [ ] Gate **every** automatic retry (retry loops, workflow activity retry policies, queue redelivery) on `connectors.DecideRetry(type, err, method)`, with `method` taken from the `method` field of `Execute`'s output (returned with failures too): only transient errors, per the type's policy. Bound transient retries with exponential backoff, jitter and an attempt limit. Log every decision (`d.LogAttrs()`) and count it (`connector_task_failures_total{type, provider, class, retried}`); alert on a rising `class="unknown"` rate.
 - [ ] For `send-email`, log and count `deliveryOutcome` (warn on `unknown`), forward the output map with the failure, and never resend except as an explicit operator or caller action (`messageKey` + `resend: true` + `resendAttempt`). See `docs/runbooks/email-delivery.md`.
@@ -593,7 +593,7 @@ STRIDE analysis of `workflow-connectors`. Every row is grounded in a real mechan
 | STRIDE | Threat | Component | Mitigation |
 |--------|--------|-----------|------------|
 | **Spoofing** | A workflow author targets an arbitrary external host through `rest-call`/`sql-query` | `restcall`, `sqlquery` | Aliases only, never a URL; the target comes from the alias registry, whose `BaseURL` must pass `definition_service`'s internal-host allowlist at write time (LLD §S9) |
-| **Spoofing** | An internal call reaches a service with no caller identity | `restcall`, `sqlquery` | `x-internal-token` required at `New`; `x-departments` required per call — `ErrMissingInternalAuth` before any request otherwise |
+| **Spoofing** | An internal call reaches a service with no caller identity | `restcall`, `sqlquery` | `x-internal-token` required at `New`; the tenant and the actor required per call — `ErrMissingInternalAuth` before any request otherwise |
 | **Tampering** | A path parameter injects extra path segments or a query string | `shared.RenderPathTemplate` | Every placeholder value is `url.PathEscape`d; an unterminated or unknown placeholder is `ErrValidation` |
 | **Tampering** | A receiver name or subject from end-user form data injects email headers (e.g. `Bcc:`) | `sendemail/gmail` raw MIME | CR/LF stripped from every value feeding a raw header line; names and subject are Q-encoded; SendGrid, SES and Graph build structured requests, not raw headers |
 | **Tampering** | A sender address alters the Graph request path | `sendemail/msgraph` | `url.PathEscape(senderEmail)` |
@@ -614,7 +614,7 @@ STRIDE analysis of `workflow-connectors`. Every row is grounded in a real mechan
 | **Information Disclosure** | A tenant's S3/SES client inherits the worker's own AWS region, endpoint or profile | `storage/gocloud`, `sendemail/ses` | Clients are built from the tenant's credentials and region only, never `config.LoadDefaultConfig` |
 | **Denial of Service** | Unbounded growth of in-process state or a huge payload | Client caches, Valkey memory, every read | Client caches are capped at 256; retired clients are closed once their last call finishes, so nothing leaks; a ref is a few hundred bytes of Valkey memory whatever the document size, refs expire after 24 h, and `noeviction` refuses new refs rather than evicting; content streams from S3 and `Read` refuses oversize documents from their metadata; objects, responses, inline content and attachments each have a size limit |
 | **Denial of Service** | A slow internal service or token endpoint ties up a worker slot | `restcall`, `sqlquery`, OAuth adapters | Per-alias `timeout` (else a 30 s per-call deadline), 30 s token-request timeout, plus the worker's per-type execution timeout on the context |
-| **Elevation of Privilege** | A domain service trusts the `x-departments` header without verifying the caller | Called internal services | `x-departments` always travels with `x-internal-token`; the receiving service authenticates the token first and applies its own row-level/role authorization |
+| **Elevation of Privilege** | A connector call claims a department grant the automation principal does not hold | `restcall`, `sqlquery`, called internal services | No `x-departments` is ever sent; the lane department travels under its own name as context; the receiving service admits the worker by mesh identity, authenticates the token and applies its own rule for automation callers |
 | **Repudiation** | A duplicate email is sent and nobody can tell why | `sendemail`, `sendintent` | Every failure carries `deliveryOutcome`; explicit resends are the only path and are counted on the send intent (`attempts`); the provider message ID is recorded on acceptance |
 | **Elevation of Privilege** | A Google service account impersonates an arbitrary mailbox | `sendemail/gmail` | Impersonation is limited to `senderEmail` with only the `gmail.send` scope; domain-wide delegation for that scope is granted by the tenant's own Workspace admin |
 

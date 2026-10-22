@@ -19,7 +19,7 @@ The shared connector library for the workflow engine — the **fixed catalogue o
 | Provider adapters — `storage/{gocloud,googledrive}`, `sendemail/{ses,sendgrid,msgraph,gmail}`; the only packages that import a cloud SDK | Writing, rotating and revoking credentials (`definition_service`) |
 | `aliasconfig` — the alias schema `rest-call`/`sql-query` resolve against, its loader and validation | The alias registry's storage, CRUD API and internal-host allowlist (`definition_service`) |
 | `docref` — document refs shared by `storage` and `send-email`: content in the platform's S3 document bucket (`docref/s3content`), reference metadata in Valkey (`docref/valkeystore`), verified on every resolution | BPMN compilation and the `connector:` task rule (`definition_service`); the DSL shape (`workflow-models`) |
-| The internal-call header contract (`x-internal-token`, `x-departments`) | Logging, metrics, tracing — the worker's |
+| The internal-call header contract (`x-internal-token`, `x-tenant-id`, `x-user-id`, `x-workflow-department-id`) | Logging, metrics, tracing — the worker's |
 
 The worker is the composition root: it maps provider names to adapter constructors and passes them in `Config`. `pkg/connectors` never imports an adapter, so a consumer that imports it alone compiles no cloud SDK.
 
@@ -55,8 +55,9 @@ type Config struct {
 }
 
 var ErrValidation, ErrUpstream, ErrMissingInternalAuth, ErrMissingTenant, ErrNotDelivered, ErrDeliveryUnknown error
-func WithDepartments(ctx context.Context, departments []string) context.Context
 func WithTenant(ctx context.Context, tenantID string) context.Context
+func WithActor(ctx context.Context, userID string) context.Context
+func WithLaneDepartment(ctx context.Context, departmentID string) context.Context
 func ClassOf(err error) (ErrorClass, string)                    // also IsTransient, IsPermanent
 func DecideRetry(connectorType string, err error, method string) RetryDecision // method: rest-call output["method"]
 ```
@@ -93,7 +94,7 @@ Every connector validates its required fields before building a provider client 
 | `ErrNotDelivered` | `send-email` only: the provider definitively did not accept the message (4xx, or the request never left), or nothing was sent because the document-ref stores (Valkey, S3) or the send-intent store failed | Transient (429, 408, DNS, connection failure, a store failure that provably reserved nothing — `sendintent.ErrNotReserved`) or permanent (other 4xx); unknown when a send-intent reservation could be neither confirmed nor released (reason `send intent not recorded`) |
 | `ErrDeliveryUnknown` | `send-email` only: the provider **may** have accepted it (timeout, reset, 5xx, crash) | Unknown: never retried automatically; a resend may deliver a duplicate (see `docs/runbooks/email-delivery.md`) |
 | `ErrUpstream` | Provider SDK/API error (never for `send-email`); network or timeout error; `>= 300` status from an internal service; undecodable response; a `2xx` internal response over 10 MiB (with `ErrTooLarge`) | Transient, permanent or unknown, by provider mapping; a response over 10 MiB is permanent (reason `response too large`), never `ErrValidation` |
-| `ErrMissingInternalAuth`, `ErrMissingTenant` | Called without `connectors.WithDepartments` / `WithTenant`, or with no departments, or a department that is empty or contains `,`, CR or LF | Permanent: a worker wiring bug |
+| `ErrMissingInternalAuth`, `ErrMissingTenant` | A `rest-call` or `sql-query` without `connectors.WithTenant` and `WithActor`, or with a tenant, actor or lane department containing CR or LF; a tenant-scoped call without `WithTenant` | Permanent: a worker wiring bug |
 
 Every error wraps exactly one of these sentinels **and** has exactly one class: **transient** (may recover; retried if the type's policy allows), **permanent** (needs a fix; never retried) or **unknown** (unrecognised; never retried automatically). Read the class only with `connectors.ClassOf(err)`, `IsTransient`, `IsPermanent` or `DecideRetry`; there is no `errors.Is` sentinel per class (an error can wrap a transient cause yet be permanent, e.g. invalid input). Each adapter maps its provider's errors: S3 error codes (`NoSuchKey` permanent, `SlowDown` transient, …), the HTTP status of Azure and GCS responses (408/429/5xx transient; an Azure account host that does not resolve is unknown, since private-endpoint DNS outages also answer NXDOMAIN), gocloud codes otherwise, Drive reasons (rate-limit 403s are transient), HTTP statuses (408/429/500/502/503/504 transient, other 4xx permanent), Valkey replies (refusals such as `OOM`, `BUSY`, failover and resharding replies are transient; an ACL refusal such as `NOPERM` is unknown) and network failures. The full tables are in [`docs/runbooks/retry-semantics.md`](docs/runbooks/retry-semantics.md). The original provider or network error stays in the chain for `errors.As`. An unknown alias additionally matches `aliasconfig.ErrUnknownAlias`.
 
@@ -256,7 +257,8 @@ In outline: call `New` once at startup with every advertised provider registered
 byType, err := connectors.New(cfg) // cfg as in the guide's Startup section
 // per task: input already carries resolved secret_ref values for the job's own tenant
 ctx = connectors.WithTenant(ctx, tenantID)          // document refs, Drive registry, send intents
-ctx = connectors.WithDepartments(ctx, departments) // rest-call / sql-query
+ctx = connectors.WithActor(ctx, principalSub)        // rest-call / sql-query: the tenant's automation principal
+ctx = connectors.WithLaneDepartment(ctx, laneDept)   // optional context, grants nothing
 out, err := byType[registry.TypeStorage].Execute(ctx, input)
 ```
 
@@ -264,7 +266,7 @@ The pre-flight checklist is in the guide ([Verification checklist](docs/integrat
 
 ### 4. Internal services called by `rest-call` / `sql-query`
 
-Every call carries `x-internal-token` (the platform's service-to-service token) and `x-departments` (comma-joined `dept_uuid:role` pairs). Authenticate the token first, then apply your own row-level or role authorization from `x-departments`. `sql-query` posts `{"queryId", "params"}` and expects `{"resultSet": [...]}`. Both connectors speak HTTP/1.1 only and decode JSON numbers as `json.Number`, so integer IDs beyond 2^53 keep every digit. A `rest-call` error response (status `>= 300`) is classified by its status alone; its body is capped at 10 MiB (cut to the first 10 MiB, or what arrived if the read failed, returned as a string with `bodyTruncated: true`).
+Every call carries `x-internal-token` (the platform's service-to-service token), `x-tenant-id` (the job's tenant) and `x-user-id` (the tenant's automation principal), and `x-workflow-department-id` (the stage's lane department) when the stage has one. No department grant is sent: the automation principal holds no department role, so `x-departments` is never set. Admit the worker by its mesh identity, authenticate the token, and apply your own rule for automation callers; the lane department is context and grants nothing. `sql-query` posts `{"queryId", "params"}` and expects `{"resultSet": [...]}`. Both connectors speak HTTP/1.1 only and decode JSON numbers as `json.Number`, so integer IDs beyond 2^53 keep every digit. A `rest-call` error response (status `>= 300`) is classified by its status alone; its body is capped at 10 MiB (cut to the first 10 MiB, or what arrived if the read failed, returned as a string with `bodyTruncated: true`).
 
 ### 5. Handling errors
 
@@ -423,11 +425,11 @@ Per-call credentials arrive in `Execute`'s input under the registry's field name
 | **Credentials never travel in a plan** | For every `secret_ref` field the worker reads the tenant's stored credential from OpenBao just before `Execute` and passes the value. A connector never sees an OpenBao path, and a diagram never names a credential (LLD §S6.2, rev 8.13) |
 | **Per-credential client isolation** | Provider clients are cached by a hash of every credential field (plus bucket or sender), so one tenant's client is never handed to another |
 | **Internal calls only** | `rest-call`/`sql-query` take aliases, never URLs; the alias `baseURL` allowlist is enforced at alias write in `definition_service` (LLD §S9) |
-| **Mandatory internal auth** | Every internal call carries `x-internal-token` and `x-departments`; missing either fails closed before any request |
+| **Mandatory internal auth** | Every internal call carries `x-internal-token`, `x-tenant-id` and `x-user-id`; a missing tenant or actor fails closed before any request, and no department grant is ever sent |
 | **Header-injection safety** | Gmail's raw MIME strips CR/LF from every header value and Q-encodes names and subject; Graph path-escapes the sender |
 | **`gcp-gcs` service-account keys only** | Workload-identity configurations that would read the worker's own filesystem or metadata identity are refused |
 | **Document refs** | Random UUIDs. The reference's tenant and bucket are checked, and its object key must be exactly `<prefix><tenant_id>/<uuid>` for the ref's own ID, **before** any S3 request — a ref from another tenant never resolves, on any replica. Content is read with the worker's own S3 credentials (none are stored in refs) and its size and SHA-256 are verified on every resolution, so an overwritten object is refused, never served; 24 h TTL |
-| **No redirects or proxy on internal calls** | `rest-call`/`sql-query` never follow a redirect, and the default transport ignores `HTTP_PROXY` / `HTTPS_PROXY`, so `x-internal-token` and `x-departments` can never be re-sent to another host or through an egress proxy |
+| **No redirects or proxy on internal calls** | `rest-call`/`sql-query` never follow a redirect, and the default transport ignores `HTTP_PROXY` / `HTTPS_PROXY`, so `x-internal-token` and the caller identity can never be re-sent to another host or through an egress proxy |
 | **Deleting a tampered ref** | A ref whose record fails its integrity checks is removed (tenant-guarded) together with its own canonical object `<prefix><tenant>/<uuid>`, never the object the record names (it may belong to another document) |
 | **One recipient per address field** | `senderEmail`/`receiverEmail` must each be a single bare address, so a value like `a@x.com, b@y.com` cannot add recipients |
 | **`senderEmail` is not bound to the credential** | The library sends as the `senderEmail` the workflow gives. A Graph app with the `Mail.Send` application permission, or a Google service account with domain-wide delegation, can send as any mailbox in the organisation: customers should restrict it at the provider (Exchange Online Application Access Policy / RBAC for Applications; delegation limited to `gmail.send` for the intended users). See [`docs/runbooks/email-delivery.md`](docs/runbooks/email-delivery.md) |
@@ -507,7 +509,7 @@ Made only from inside `Execute`, on the worker's behalf.
 |---|---|---|
 | `definition_service` | Alias registry | Worker fetches `GET /internal/connector-aliases` at startup → `Config.Aliases` |
 | OpenBao (via the worker) | Tenant credentials | Resolved values in `Execute`'s input |
-| `execution_service` | Task input, departments | `IOMapping`-resolved input map; `WithDepartments` |
+| `execution_service` | Task input, caller identity | `IOMapping`-resolved input map; `WithTenant`, `WithActor`, `WithLaneDepartment` |
 
 ### 4. Infrastructure dependencies
 

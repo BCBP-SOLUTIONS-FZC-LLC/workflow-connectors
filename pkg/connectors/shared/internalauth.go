@@ -6,26 +6,21 @@ import (
 	"strings"
 )
 
-type departmentsCtxKey struct{}
+type (
+	departmentsCtxKey    struct{}
+	actorCtxKey          struct{}
+	laneDepartmentCtxKey struct{}
+)
 
-// WithDepartments carries the acting user's "dept_uuid:role" pairs to
-// rest-call and sql-query, which send them comma-joined as x-departments.
 func WithDepartments(ctx context.Context, departments []string) context.Context {
 	return context.WithValue(ctx, departmentsCtxKey{}, departments)
 }
 
-// DepartmentsFromContext returns the departments set by WithDepartments. ok
-// is false unless there is at least one and every one is usable in the
-// comma-joined x-departments header: non-empty, with no ',', '\r' or '\n'
-// (which would add or forge a department, or break the header).
 func DepartmentsFromContext(ctx context.Context) ([]string, bool) {
 	v, _ := ctx.Value(departmentsCtxKey{}).([]string)
 	return v, len(v) > 0 && validateDepartments(v) == nil
 }
 
-// DepartmentsHeaderValue returns the x-departments value for ctx, or
-// ErrMissingInternalAuth (permanent: a worker wiring bug) when the context
-// has no departments or one is empty or contains ',', '\r' or '\n'.
 func DepartmentsHeaderValue(ctx context.Context) (string, error) {
 	v, _ := ctx.Value(departmentsCtxKey{}).([]string)
 	if len(v) == 0 {
@@ -44,4 +39,51 @@ func validateDepartments(departments []string) error {
 		}
 	}
 	return nil
+}
+
+func WithActor(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, actorCtxKey{}, userID)
+}
+
+func ActorFromContext(ctx context.Context) (string, bool) {
+	v, _ := ctx.Value(actorCtxKey{}).(string)
+	return v, v != ""
+}
+
+func WithLaneDepartment(ctx context.Context, departmentID string) context.Context {
+	return context.WithValue(ctx, laneDepartmentCtxKey{}, departmentID)
+}
+
+func LaneDepartmentFromContext(ctx context.Context) (string, bool) {
+	v, _ := ctx.Value(laneDepartmentCtxKey{}).(string)
+	return v, v != ""
+}
+
+type CallerHeaders struct {
+	TenantID         string
+	UserID           string
+	LaneDepartmentID string
+}
+
+func CallerHeadersFromContext(ctx context.Context) (CallerHeaders, error) {
+	tenant, _ := TenantFromContext(ctx)
+	actor, _ := ActorFromContext(ctx)
+	lane, _ := LaneDepartmentFromContext(ctx)
+	if tenant == "" || actor == "" {
+		return CallerHeaders{}, ErrMissingInternalAuth
+	}
+	for name, v := range map[string]string{"tenant": tenant, "actor": actor, "lane department": lane} {
+		if strings.ContainsAny(v, "\r\n") {
+			return CallerHeaders{}, fmt.Errorf("%w: the %s contains CR or LF", ErrMissingInternalAuth, name)
+		}
+	}
+	return CallerHeaders{TenantID: tenant, UserID: actor, LaneDepartmentID: lane}, nil
+}
+
+func (h CallerHeaders) Apply(header interface{ Set(key, value string) }) {
+	header.Set(TenantIDHeader, h.TenantID)
+	header.Set(UserIDHeader, h.UserID)
+	if h.LaneDepartmentID != "" {
+		header.Set(LaneDepartmentHeader, h.LaneDepartmentID)
+	}
 }

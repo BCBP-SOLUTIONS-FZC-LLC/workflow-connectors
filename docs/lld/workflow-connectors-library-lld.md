@@ -17,6 +17,7 @@
 
 | Rev | Date | Change |
 |---|---|---|
+| 1.21 | 2026-10-22 | **Connector calls carry the caller identity and no department grant** (§3, §7.4, §8.2, §10.4, §17, Part II). IAM's header contract for calls to alias targets: an automation call names the tenant (`x-tenant-id`) and the tenant's automation principal (`x-user-id`) and carries no `x-departments`, since the principal holds no department role and any value would be an invented grant. `WithActor` and `WithLaneDepartment` are added, the lane department travels as context in `x-workflow-department-id`, `ErrMissingInternalAuth` requires the tenant and the actor, and `WithDepartments` no longer affects the request; it stays exported until a major version. |
 | 1.20 | 2026-10-19 | **Status follows the release** (header, §1, §16.1, §19.4). `v2.1.0` was released on 2026-10-13 on `fba27ec`; the status, the code-state paragraph, the sign-off note and §19.4 no longer call rev 1.19 unreleased. The design repository's separate `workflow_connectors.md` became a forward pointer to this Part II. |
 | 1.19 | 2026-10-13 | **Production-readiness fixes, two review rounds (unreleased, next `v2.1.0`, a MINOR: new exported API only; PR #8, together with rev 1.18).** *Storage:* Drive by-name lookups skip folders, shortcuts and Google-native files; Drive fetch reads past an expired lease, returns in-progress for a live delete, and falls back from a `FAILED` row or a recorded file deleted outside the connector; gocloud `delete` succeeds only on a missing **object** (S3 `NoSuchKey` or a 404 confirmed by `HeadBucket`, Azure `BlobNotFound`, GCS 404 confirmed by listing; tenant `aws-s3` credentials need `s3:ListBucket`); Azure/GCS 408/429/5xx transient, Azure NXDOMAIN unknown; `bucket`/`key` ≤ 1024 bytes, UTF-8, no control characters. *send-email:* the intent is reserved before attachments; an ambiguous `Reserve` is read back, then released by token (`sendintent.Releaser`, `ErrNotReserved`), retried only when the release freed this call's row; a panic after reserving records the intent; stored text bounded (4 KiB, 1 KiB for Drive); a duplicate of an accepted intent returns `messageId`/`sentAt`; `contentType` exact; `messageKey`/`resendAttempt` bounds; Graph attachments ≤ 2,900,000 bytes and request ≤ 4,000,000 bytes, JSON not HTML-escaped; Gmail content types normalised; SES `region` one DNS label; `PruneIntents` (`SKIP LOCKED`, conditions re-checked; migrations `000003`–`000005`). *Document refs:* Valkey `ASK`/`MOVED` followed once (master cache; `+asking` ACL; refused `ASKING` unknown), capacity replies transient, sub-ms durations rounded up, `Options.Validate`; stricter `CheckDurability`; `Create` cleans up record and object (5 s each); a tampered ref's `Delete` never deletes the object its record names; `Read` no longer preallocates from an untrusted size; `s3content.Check` probes put/delete. *Internal calls:* `shared.BaseTransport` (no panic on a wrapped default transport), no environment proxy, `rest-call` `method` output, a `2xx` over 10 MiB a permanent `ErrUpstream` + `ErrTooLarge` (`response too large`), scalar params (`FormatScalarParam`), alias query kept verbatim and parsed strictly, `;` refused, `aliasconfig.Load` strict, `New` validates aliases; sql-query `paramCount` exact; sql-query and document-extract experimental. *Registry:* `provider` `Required`; `chat-notify` out of `All()` (`Lookup`, `ChatNotifyDefinition`; OQ-18). *Tests and CI:* REG-11–REG-20, TestIT07–IT10, TestPG04–PG07, a 3-master Valkey Cluster in CI (`valkey-cluster` profile), coverage 99.96 % (2,729 of 2,730); `make docs-compile`, go-arch-lint v1.15.0 verified, daily Trivy cache. §19.4 lists the upgrade steps. Behaviour and public API change: the §16.1 rows (module owner, security review, both consumers) need re-signing before `v2.1.0`. |
 | 1.18 | 2026-10-13 | **Execution wired; open questions closed; sign-off recorded** (§5 Part II, §16, §16.1). `execution_service` runs the connector worker on `workflow-connectors/v2` `v2.0.0` and `platform-pgcommon/v2` `v2.0.1` (its LLD rev 1.76): retries follow `connectors.DecideRetry` with a bounded attempt count, backoff and jitter; every decision is logged and counted by `connector_task_failures_total`; each call carries its tenant; document references, the Drive registry and the send-email intents are wired, with a tenant policy on their tables; `/fail` carries the connector's output. OQ-14 and OQ-17 are closed. OQ-7, OQ-8, OQ-11 and OQ-16 are struck through as dropped from this release and kept for future reference; OQ-13 is an accepted risk. §S5 no longer lists the removed `call_pool` task. The Workflow team's decision is recorded in §16.1. No code or API change. |
@@ -111,7 +112,7 @@ The module owns:
 - **Document references** (`docref`, `docref/s3content`, `docref/valkeystore`) — the resolution service that lets one connector's output be another's input on any worker replica: content in the platform's S3 document bucket, reference metadata in Valkey, verified on every resolution.
 - **The Drive document registry** (`documents`, `documents/sqlstore`) and **send intents** (`sendintent`, `sendintent/sqlstore`) — the ports, in-memory stores and PostgreSQL stores (on platform-pgcommon, with their migrations) behind Drive uploads (§4.5) and send-email duplicate-request protection (§5.4.2a).
 - **The retry decision** — every error's class (`connectors.ClassOf`) and `connectors.DecideRetry`, which the worker applies before any automatic retry (§9.2).
-- **The internal-call header contract** — `x-internal-token` and `x-departments` names and the `WithDepartments` context carrier.
+- **The internal-call header contract** — the `x-internal-token`, `x-tenant-id`, `x-user-id` and `x-workflow-department-id` names and the `WithTenant`, `WithActor` and `WithLaneDepartment` context carriers.
 
 ### 2.2 Out of scope (owned elsewhere)
 
@@ -151,7 +152,7 @@ workflow-connectors/
 │       ├── config.go                 # Config
 │       ├── errors.go                 # re-exported sentinels; ErrorClass, ClassOf, IsTransient, IsPermanent, IsRetryable
 │       ├── retry.go                  # DecideRetry, RetryDecision (LogAttrs), AutoRetryAllowed
-│       ├── internalauth.go           # WithDepartments / DepartmentsFromContext, WithTenant / TenantFromContext
+│       ├── internalauth.go           # WithTenant, WithActor, WithLaneDepartment (and the inert WithDepartments)
 │       ├── aliasconfig/              # alias schema, Load, Validate, Resolve*  (yaml.v3)
 │       ├── shared/                   # errors and classes, field helpers, header names, tenant/departments ctx, size limits, HTTP clients, ClientCache (stdlib)
 │       ├── docref/                   # document refs: Service (Create/Lookup/Open/Read/Delete), Store + ContentStore ports, memory stores (tests)
@@ -367,7 +368,7 @@ No transaction is held open across a Drive call. The lease (`documents.DefaultLe
 - **Input** is `map[string]any` as decoded from JSON: strings, `bool`, `[]any`, `map[string]any`. Helpers read fields leniently — a wrong type reads as the zero value — and validation then reports the field as missing.
 - **Output** is `map[string]any` whose **top-level keys only** are addressable by `IOMapping.Outputs.Source` (Decision #13).
 - **Errors** match a kind sentinel for `errors.Is` (`ErrValidation`, `ErrUpstream`, `ErrMissingInternalAuth`, `ErrMissingTenant`, `ErrNotDelivered`, `ErrDeliveryUnknown`; §17) and carry one retry class, read with `connectors.ClassOf` (§9.2); the underlying provider or network error stays in the chain for `errors.As`.
-- **Context** carries cancellation and, for `rest-call`/`sql-query`, the departments (`WithDepartments`).
+- **Context** carries cancellation and, for `rest-call`/`sql-query`, the caller identity: the tenant (`WithTenant`), the acting principal (`WithActor`) and, optionally, the lane department (`WithLaneDepartment`).
 
 ### 5.2 Facade
 
@@ -399,10 +400,14 @@ func IsPermanent(err error) bool
 func IsRetryable(err error) bool                                 // transient only; prefer DecideRetry
 func DecideRetry(connectorType string, err error, method string) RetryDecision
 func AutoRetryAllowed(connectorType string, err error, method string) bool
-func WithDepartments(ctx context.Context, departments []string) context.Context
-func DepartmentsFromContext(ctx context.Context) ([]string, bool)
 func WithTenant(ctx context.Context, tenantID string) context.Context
 func TenantFromContext(ctx context.Context) (string, bool)
+func WithActor(ctx context.Context, userID string) context.Context
+func ActorFromContext(ctx context.Context) (string, bool)
+func WithLaneDepartment(ctx context.Context, departmentID string) context.Context
+func LaneDepartmentFromContext(ctx context.Context) (string, bool)
+func WithDepartments(ctx context.Context, departments []string) context.Context // inert: sends nothing (§10.4)
+func DepartmentsFromContext(ctx context.Context) ([]string, bool)
 ```
 
 `New` returns `storage`, `send-email`, `chat-notify` and `rest-call`; it fails on an empty `InternalToken` or on `Aliases` that fail `aliasconfig.Config.Validate` (§4.3), and panics on a duplicate `Type`. `chat-notify` is built but not authorable: `registry.All()` lists only the other three, and `registry.Lookup` also returns `ChatNotifyDefinition()` so `DecideRetry` reads its `unsafe` policy. `sql-query` and `document-extract` are constructible from their own packages (`sqlquery.New`, `documentextract.New`) but are not in `New` and not in `registry.All()`, and are marked experimental, not for production (§16 OQ-7).
@@ -587,8 +592,8 @@ The two tasks may run on different replicas, and either may restart in between. 
 
 ### 8.2 `rest-call` to an internal service
 
-1. Worker sets `connectors.WithDepartments(ctx, ["<dept_uuid>:<role>", …])`.
-2. `Execute` checks `endpointAlias`, resolves it (unknown → `aliasconfig.ErrUnknownAlias`), then requires departments in the context (absent → `ErrMissingInternalAuth`, **before** building any request).
+1. Worker sets the caller identity: `connectors.WithTenant(ctx, <job tenant>)`, `connectors.WithActor(ctx, <the tenant's automation principal subject>)` and, when the stage has one, `connectors.WithLaneDepartment(ctx, <lane department>)`.
+2. `Execute` checks `endpointAlias`, resolves it (unknown → `aliasconfig.ErrUnknownAlias`), then requires the tenant and the actor in the context (absent, blank or containing CR/LF → `ErrMissingInternalAuth`, **before** building any request); a lane department containing CR/LF is refused the same way.
 3. Renders the path, encodes the body, applies the alias timeout, sets both headers, sends.
 4. Decodes the response (at most 10 MiB; a `2xx` over it is a permanent `ErrUpstream` + `ErrTooLarge`, reason `response too large`); returns the map (with `method`), with `ErrUpstream` on `>= 300`. A redirect is returned, not followed.
 
@@ -664,7 +669,7 @@ The policy is read with `registry.Lookup`, so `chat-notify` — built by `New` b
 | Attachment ref not found (expired, another tenant's, never created), its object missing, or its object altered | `docref.Service.Read` | `ErrValidation` (+ `docref.ErrNotFound` / `ErrSourceMissing` / `ErrIntegrityViolation`) before the client is built |
 | Valkey or S3 unreachable, Valkey full (`noeviction` refuses writes), or metadata not confirmed in the AOF (`ErrNotPersisted`) | `docref.Service` | storage: `ErrUpstream` (retried, `safe` — a retry mints a new ref); send-email attachments: `ErrNotDelivered` (nothing sent) |
 | Unknown alias | `aliasconfig.Resolve*` | `ErrValidation`, also matching `aliasconfig.ErrUnknownAlias` |
-| Departments missing from context, empty, or one empty or containing `,`/CR/LF | `shared.DepartmentsHeaderValue` | `ErrMissingInternalAuth` (permanent); no request sent |
+| Tenant or actor missing from context or blank, or any caller identity value containing CR/LF | `shared.CallerHeadersFromContext` | `ErrMissingInternalAuth` (permanent); no request sent |
 | Internal service unreachable / timeout | `http.Client.Do` error | `ErrUpstream`, with the transport error in the chain |
 | Internal service redirects | `3xx` status (redirects not followed) | `ErrUpstream`; `rest-call` also returns the response map |
 | Payload over a size limit | Inline/attachment/upload checks; `bucket`/`key` over 1024 bytes | `ErrValidation` |
@@ -726,7 +731,7 @@ The connectors take the tenant only where they store something on the tenant's b
 ### 10.2 Network isolation
 
 - `rest-call`/`sql-query` reach only aliases, never raw URLs; the internal-host allowlist on alias `baseURL` is enforced at alias write in `definition_service` (§S9, `CONNECTOR_ALIAS_ALLOWED_HOSTS`).
-- Internal calls never go through an egress proxy: the default internal transport (nil `HTTPClient` or nil transport) has `Proxy` unset, so `HTTP_PROXY`/`HTTPS_PROXY` never see `x-internal-token` or `x-departments`; a caller-supplied `*http.Transport` keeps its own proxy setting. Every transport the library builds starts from `shared.BaseTransport()`, which also works when `http.DefaultTransport` has been replaced by a wrapper (otelhttp, httpmock).
+- Internal calls never go through an egress proxy: the default internal transport (nil `HTTPClient` or nil transport) has `Proxy` unset, so `HTTP_PROXY`/`HTTPS_PROXY` never see `x-internal-token` or the caller identity headers; a caller-supplied `*http.Transport` keeps its own proxy setting. Every transport the library builds starts from `shared.BaseTransport()`, which also works when `http.DefaultTransport` has been replaced by a wrapper (otelhttp, httpmock).
 - Provider adapters reach only their provider's public API endpoints, through the SDK's default endpoints; the Graph base URL is the constant `https://graph.microsoft.com/v1.0`. The SES `region` must be one DNS label, so it cannot point the signed request at another host.
 
 ### 10.3 Input validation
@@ -743,7 +748,7 @@ The connectors take the tenant only where they store something on the tenant's b
 
 | Call | Authentication | Authorization |
 |---|---|---|
-| `rest-call` / `sql-query` → internal service | `x-internal-token` (`Config.InternalToken`) | `x-departments` (`dept_uuid:role` pairs) — evaluated by the receiving service |
+| `rest-call` / `sql-query` → internal service | `x-internal-token` (`Config.InternalToken`); the receiving service also admits the worker by its mesh identity | No grant is sent. `x-tenant-id` names the tenant and `x-user-id` the tenant's automation principal; `x-workflow-department-id` carries the stage's lane department as context and grants nothing. `x-departments`, `x-tenant-roles`, `x-plan`, `x-feature-flags` and `x-residency-mode` are never sent: the automation principal holds no department role (IAM HLD §5.8), and the others are written by the gateway filter only. What an automation call may do is the receiving service's rule (IAM HLD §17.2) |
 | Adapter → provider | The tenant's resolved credential | The provider's own (bucket policy, sender verification, Workspace delegation, Graph app permissions) |
 
 ---
@@ -920,7 +925,7 @@ All connector errors are Go errors. The worker reads their **kind** with `errors
 |---|---|---|---|
 | `ErrValidation` | `connectors: invalid input` | Missing/invalid required field; unknown `operation`/`method`/`documentLocation`; omitted or unconfigured `provider`; unresolvable document ref; `paramCount` mismatch; path template error; body encode error; request build error | Permanent |
 | `ErrUpstream` | `connectors: upstream call failed` | Provider SDK/API error; network or timeout error; client construction error other than a validation error; `>= 300` status; undecodable response; a `2xx` internal response over 10 MiB (with `ErrTooLarge`, reason `response too large`, `shared.ReasonResponseTooLarge`). The cause stays in the chain | Transient, permanent or unknown by provider mapping (§9.2) |
-| `ErrMissingInternalAuth` | `connectors: missing internal auth context (WithDepartments not called)` | `rest-call`/`sql-query` without departments in context | Permanent: worker bug |
+| `ErrMissingInternalAuth` | `connectors: missing internal auth context (WithTenant and WithActor not called)` | `rest-call`/`sql-query` without the tenant or the actor in context, or with a caller identity value containing CR/LF | Permanent: worker bug |
 | `ErrNotDelivered` (`*sendemail.SendError`) | `connectors: not delivered: <provider> (status N): …` | send-email: the provider definitively did not accept the message | Transient (429/408/throttling code, DNS, connection failure) → retried; else permanent. Unknown when the outcome could not be recorded on the send intent |
 | `ErrDeliveryUnknown` (`*sendemail.SendError`) | `connectors: delivery outcome unknown (the provider may have accepted the message): <provider> (status N): … — do not resend without verifying delivery; a resend may duplicate the email` | send-email: ambiguous outcome | Unknown: **never retried automatically**; a resend may duplicate |
 | `sendintent.ErrDuplicateRequest` (`*sendintent.DuplicateRequestError`) | `connectors: duplicate send request: messageKey … already has send intent …` | A messageKey already reserved (and not last `not_delivered`), whose intent is pending or unknown (a duplicate of an accepted intent succeeds); also matches `ErrValidation`; nothing sent | Permanent |
@@ -952,7 +957,7 @@ All connector errors are Go errors. The worker reads their **kind** with `errors
 | Direction | Mechanism | Description |
 |---|---|---|
 | worker → this | Go import `pkg/connectors` + adapters | `New(Config)` once at startup; `Execute` per task inside its bounded pool, per-type timeout and lease |
-| worker → this | `connectors.WithDepartments` | Forwarded `x-departments` for `rest-call`/`sql-query` |
+| worker → this | `connectors.WithTenant`, `connectors.WithActor`, `connectors.WithLaneDepartment` | `x-tenant-id`, `x-user-id` and `x-workflow-department-id` for `rest-call`/`sql-query` |
 | this → worker | `Execute` return | Output map forwarded verbatim to `/internal/connector-tasks/:id/complete`; error classified per §17 for retry or `/fail` |
 
 Consumer obligations are listed in `ARCHITECTURE.md` (Consumer conformance checklist); the step-by-step wiring guide is [`docs/integration/connector-worker.md`](../integration/connector-worker.md).
@@ -979,7 +984,7 @@ None direct. The worker reads `connectors/<tenant>/<type>/<field>` and passes va
 
 ### 18.4 Integration with internal platform services
 
-`rest-call` (any internal API registered as an alias) and `sql-query` (an owning service's query-execution endpoint). Both receive `x-internal-token` and `x-departments` on every call.
+`rest-call` (any internal API registered as an alias) and `sql-query` (an owning service's query-execution endpoint). Both receive `x-internal-token`, `x-tenant-id` and `x-user-id` on every call, and `x-workflow-department-id` when the stage has a lane department.
 
 ### 18.5 Integration with provider APIs
 
@@ -1063,7 +1068,7 @@ The module has no runtime of its own; these are the points a worker operator sho
 | `ErrValidation` "build <provider> client" | Missing or invalid tenant credential | Ask the tenant admin to (re)submit the credential |
 | `ErrValidation` "chat-notify has no provider configured" | `Config.ChatNotifyClient` not set | Wire a real provider; until then chat tasks fail rather than report a false send |
 | `ErrUpstream` from one provider only | Provider outage, throttling or revoked access | Provider status; tenant credential validity |
-| `ErrMissingInternalAuth` | Worker not setting departments | Worker bug — fix wiring |
+| `ErrMissingInternalAuth` | Worker not setting the tenant or the actor | Worker bug — fix wiring |
 | `aliasconfig: unknown alias` | Alias deleted, or worker started before it was added (no hot reload) | Restart the worker after alias changes |
 | `ErrUpstream` reason `response too large` | An internal service returned a `2xx` body over 10 MiB; the call was processed | Fix the endpoint or the alias (paginate); not retried |
 | Document refs failing with `NOPERM` during resharding | Valkey ACL user without `+asking` | Add `+asking` on every node (§19.4) |
@@ -1285,7 +1290,7 @@ The new endpoint is a **sibling** of the human path, not a re-route through it: 
 **`rest-call`/`sql-query` are the exception — internal platform APIs only, never external ones.** Their `endpointAlias`/`queryAlias` (§S6.4.4/§S6.4.5) resolves, via a small config/registry `cmd/connector-worker` owns itself, to another microservice within this platform (e.g. Tender's own API, PMS's own API) — never an arbitrary external domain. Every call `cmd/connector-worker` makes through this path carries **two required pieces, both mandatory, neither optional**:
 
 1. The platform's existing internal-service-to-service token (`execution_service.md` §5.7/§9.2's `x-internal-token`/`INTERNAL_API_TOKEN` — the same mechanism `execution_service`'s own `/internal/*` routes already require), proving the call originates from trusted platform infrastructure.
-2. The acting user/tenant's forwarded `x-departments` header (`dept_uuid:role` pairs — see the cross-repo header-format note in `execution_service.md`/`definition_service.md`), so the target internal service can apply its own row-level/role-based authorization if it needs to.
+2. The caller identity: `x-tenant-id` (the job's tenant) and `x-user-id` (the tenant's automation principal), plus the lane department in `x-workflow-department-id` as context. No department grant is sent; the target applies its own rule for automation callers (§10.4).
 
 No per-tenant *secret* is involved for these two connector types — but the auth itself is real, mandatory, and explicitly documented as such, never waved away as unnecessary.
 
@@ -1424,7 +1429,7 @@ Camunda reference shape: the generic REST connector — scoped down significantl
 | Output | `body` | any | |
 | Output | `bodyTruncated` | bool | Set only when the body exceeded the 10 MiB cap or was cut off; a `2xx` over the cap fails permanently with reason `response too large` (Part I §5.4.3). |
 
-Auth (§S6.2): every call carries the platform's `x-internal-token` and the acting user/tenant's forwarded `x-departments` header — both mandatory, no per-call configuration needed.
+Auth (§S6.2): every call carries `x-internal-token`, `x-tenant-id` and `x-user-id` — all mandatory, no per-call configuration needed — and the lane department as context (§10.4).
 
 Retry guidance: retryable only if the resolved internal endpoint's method is idempotent (e.g. a `GET` lookup) — a `POST`/non-idempotent endpoint gets no automatic retry.
 
@@ -1442,7 +1447,7 @@ Camunda reference shape: the generic SQL connector — scoped down significantly
 | IOMapping input | `params` | list | Bound as query parameters by the owning service itself, never string-interpolated by this connector. |
 | Output | `resultSet` | list of rows | Row count bounded (a fixed cap, e.g. a few hundred rows) to keep `context_json` small — a large result set is a design smell for a workflow variable, not this connector's job to paginate. |
 
-Auth (§S6.2): same as `rest-call` — `x-internal-token` plus forwarded `x-departments`, both mandatory.
+Auth (§S6.2): same as `rest-call` — `x-internal-token`, `x-tenant-id` and `x-user-id`, all mandatory.
 
 Retry guidance: retryable, because scoping to read-only aliases makes every v1 query naturally idempotent.
 
@@ -1514,7 +1519,7 @@ Consequence: this design does not adopt Camunda's actual connector type identifi
 
 - **Provider credentials for `storage`/`send-email`/`document-extract`/`chat-notify` never reach `context_json`, Temporal's workflow history, the `WorkflowTaskCreated` event payload, or the Valkey Stream that payload is additionally pushed onto for connector-typed tasks (§S6.5).** `definition_service` still collects the raw value once, at author time, but writes it to OpenBao and passes only the resulting secret path through `IOMapping`/`context_json` (§S6.2); `cmd/connector-worker` resolves that path to the real value in memory, only inside `Connector.Execute()`. This is mandated design, not a UI-side convention.
 - **A task reads only its own tenant's credentials.** The worker refuses any secret reference other than `connectors/<task tenant>/<connector type>/<field>` before reading it (§S6.2), because its OpenBao token is not scoped to a tenant.
-- **`rest-call`/`sql-query` calls always carry both required auth pieces** — the platform's `x-internal-token` and the acting user/tenant's forwarded `x-departments` header (comma-separated `dept_uuid:role` pairs, e.g. `018e1f2a-...:reviewer`) — never one without the other (§S6.2). No per-tenant secret is involved for these two connector types, but the auth itself is mandatory and explicit.
+- **`rest-call`/`sql-query` calls always carry the required auth pieces** — `x-internal-token` plus the caller identity, `x-tenant-id` and `x-user-id` (the tenant's automation principal) — and never a department grant (§S6.2, §10.4). No per-tenant secret is involved for these two connector types, but the auth itself is mandatory and explicit.
 - **No v1 connector automatically forwards a received document to a third-party service with no person in the loop.** `llm-verify` — the connector design that would have done exactly that, forwarding to an external LLM provider — is not part of the v1 catalogue (§S6.4.7, §S10 Decision #3); nothing in v1 raises that specific trust-boundary question.
 
 ## S9. Follow-Ups (Non-Blocking)

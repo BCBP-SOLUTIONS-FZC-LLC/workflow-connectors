@@ -3,9 +3,7 @@
 //
 // EXPERIMENTAL — not for production. It is not built by connectors.New nor
 // listed in registry.All(), and its API may change in any release. Known
-// gaps: the request carries no tenant scope (no connectors.WithTenant check
-// and no tenant sent to the service), so tenant isolation rests entirely on
-// the service and the x-departments header.
+// gaps: the service alone scopes the query to the x-tenant-id it receives.
 package sqlquery
 
 import (
@@ -69,7 +67,7 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, fmt.Errorf("%w: queryAlias %q expects %d params, got %d", shared.ErrValidation, alias, q.ParamCount, len(params))
 	}
 
-	departments, err := shared.DepartmentsHeaderValue(ctx)
+	caller, err := shared.CallerHeadersFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +87,7 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(shared.InternalTokenHeader, s.internalToken)
-	req.Header.Set(shared.DepartmentsHeader, departments)
+	caller.Apply(req.Header)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

@@ -144,7 +144,7 @@ func restCallStatus(t *testing.T, status int, method string) error {
 	cfg.Aliases = aliasconfig.Config{RestCall: []aliasconfig.Endpoint{{Alias: "svc", Method: method, BaseURL: srv.URL, PathTemplate: "/x"}}}
 	all, err := connectors.New(cfg)
 	require.NoError(t, err)
-	_, err = all[registry.TypeRestCall].Execute(connectors.WithDepartments(context.Background(), []string{"d:r"}), map[string]any{"endpointAlias": "svc"})
+	_, err = all[registry.TypeRestCall].Execute(connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub"), map[string]any{"endpointAlias": "svc"})
 	require.Error(t, err)
 	return err
 }

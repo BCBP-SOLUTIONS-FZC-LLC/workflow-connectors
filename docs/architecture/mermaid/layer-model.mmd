@@ -16,7 +16,7 @@ graph TD
         storage["storage/\nProviderClient port · ProviderConstructor\nfetch / upload / delete · per-credential client cache (256)\nMockStorageClient"]
         sendemail["sendemail/\nProviderClient port · EmailMessage · EmailAttachment\ntemplateless-provider rule · attachments via *docref.Service\nper-sender client cache (256) · MockSendEmailClient"]
         chatnotify["chatnotify/\nProviderClient port · nil client → every call ErrValidation (no real provider yet)"]
-        restcall["restcall/\nalias → internal endpoint · x-internal-token + x-departments"]
+        restcall["restcall/\nalias → internal endpoint · x-internal-token + caller identity"]
         sqlquery["sqlquery/  (not wired into New)\nalias → owning service's query endpoint, never SQL text"]
         docextract["documentextract/  (not wired into New)\nProviderClient port · nil client → ErrValidation"]
     end

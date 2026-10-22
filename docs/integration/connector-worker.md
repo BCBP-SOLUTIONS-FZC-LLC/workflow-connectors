@@ -77,7 +77,7 @@ Details: [`docs/runbooks/document-refs.md`](../runbooks/document-refs.md).
 
 Provider clients never follow redirects and speak HTTP/1.1 only, so a proxy must not require HTTP/2. They honour `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` like Go's default transport.
 
-Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient` nil (or a client whose `Transport` is nil) the internal transport has `Proxy` unset, so `x-internal-token` and `x-departments` cannot reach an egress proxy named by `HTTP_PROXY` / `HTTPS_PROXY`. A worker that passes its own `*http.Transport` keeps that transport's `Proxy` setting and must not point it at a proxy outside the platform.
+Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient` nil (or a client whose `Transport` is nil) the internal transport has `Proxy` unset, so `x-internal-token` and the caller identity cannot reach an egress proxy named by `HTTP_PROXY` / `HTTPS_PROXY`. A worker that passes its own `*http.Transport` keeps that transport's `Proxy` setting and must not point it at a proxy outside the platform.
 
 ## 3. Configuration
 
@@ -130,14 +130,15 @@ Do this once per process, and **exit on any error**: each check guards against s
 
 ```go
 ctx = connectors.WithTenant(ctx, task.TenantID)            // required: refs, Drive registry, send intents
-ctx = connectors.WithDepartments(ctx, task.Departments)   // required for rest-call
+ctx = connectors.WithActor(ctx, task.PrincipalSub)        // required for rest-call: the tenant's automation principal
+ctx = connectors.WithLaneDepartment(ctx, task.LaneDept)   // optional context, grants nothing
 ctx, cancel := context.WithTimeout(ctx, taskTimeout)      // below documents.DefaultLease (15 min)
 defer cancel()
 out, err := byType[task.Type].Execute(ctx, task.Input)
 ```
 
 - **Tenant.** Always the job's own tenant. Document refs, the Drive registry and send intents are scoped by it; a ref created for one tenant does not resolve for another.
-- **Departments.** `rest-call` sends them as `x-departments`. A missing, empty or malformed list (an entry that is empty or contains `,`, CR or LF) fails the call with `ErrMissingInternalAuth` before anything is sent.
+- **Caller identity.** `rest-call` sends the tenant as `x-tenant-id`, the actor as `x-user-id` and the lane department as `x-workflow-department-id`. The actor is the tenant's automation principal subject, resolved by the service that enqueued the task, never a role or a department grant. A missing tenant or actor, or a CR or LF in any value, fails the call with `ErrMissingInternalAuth` before anything is sent.
 - **Secrets.** Resolve every `secret_ref` field for the job's own tenant immediately before `Execute` and put the values in `Input`. Keep them in memory only; never write them to `context_json`, history or logs. The library never sees an OpenBao path.
 - **Timeout.** Keep the per-call timeout below `documents.DefaultLease` (15 minutes), so a live Drive upload never loses its lease (LLD DOC-6, OQ-13).
 - **Outputs.** Forward the output map unchanged. It is returned with failures too: `send-email` always carries `deliveryOutcome`; a `rest-call` carries `method` (the HTTP method sent) on every result once the request was sent, and a status `>= 300` also `status`, `headers` and `body`. A `2xx` whose body exceeds 10 MiB fails permanently with reason `response too large` (not `ErrValidation`: the service processed the call), with `status`, `headers` and `bodyTruncated: true`.
@@ -202,7 +203,7 @@ Before go-live, and after every library upgrade (read the `CHANGELOG.md` section
 - [ ] The worker's Valkey user is the runbook ACL line, not `default`.
 - [ ] Every registry provider is registered; no mock clients.
 - [ ] `SendIntents` and `DocRefs` are set.
-- [ ] Every task sets `WithTenant`; `rest-call` tasks set `WithDepartments`.
+- [ ] Every task sets `WithTenant`; `rest-call` tasks also set `WithActor` (and `WithLaneDepartment` when the stage has a lane).
 - [ ] Per-call timeout below 15 minutes.
 - [ ] Every retry path (loop, activity retry policy, redelivery) calls `DecideRetry`; retries are bounded with backoff.
 - [ ] Failures are logged with `d.LogAttrs()` and counted by class; `deliveryOutcome` is logged for `send-email`.
@@ -339,7 +340,8 @@ func Start(ctx context.Context, d Deps) (*Worker, error) {
 type Task struct {
 	Type        string         // registry.TypeStorage, TypeSendEmail, TypeRestCall
 	TenantID    string         // the job's own tenant
-	Departments []string       // dept_uuid:role pairs (rest-call)
+	PrincipalSub string        // the tenant's automation principal (rest-call)
+	LaneDept     string        // the stage's lane department, context only
 	Input       map[string]any // secret_ref fields already resolved for TenantID
 }
 
@@ -351,8 +353,9 @@ const (
 // Run executes a task, retrying only what connectors.DecideRetry allows.
 func (w *Worker) Run(ctx context.Context, t Task) (map[string]any, error) {
 	ctx = connectors.WithTenant(ctx, t.TenantID)
-	if len(t.Departments) > 0 {
-		ctx = connectors.WithDepartments(ctx, t.Departments)
+	ctx = connectors.WithActor(ctx, t.PrincipalSub)
+	if t.LaneDept != "" {
+		ctx = connectors.WithLaneDepartment(ctx, t.LaneDept)
 	}
 	c, ok := w.byType[t.Type]
 	if !ok {

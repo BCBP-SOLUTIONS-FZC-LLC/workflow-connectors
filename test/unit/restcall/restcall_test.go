@@ -24,13 +24,12 @@ func restCallConnector(t *testing.T, srv *httptest.Server, ep aliasconfig.Endpoi
 	return restcall.New(aliases, nil, testInternalToken)
 }
 
-func TestRestCall_AttachesMandatoryHeaders(t *testing.T) {
+func TestRestCall_SendsTheCallerIdentityAndNoDepartmentGrant(t *testing.T) {
 	t.Parallel()
 
-	var gotToken, gotDepartments string
+	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotToken = r.Header.Get("x-internal-token")
-		gotDepartments = r.Header.Get("x-departments")
+		got = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
@@ -38,19 +37,26 @@ func TestRestCall_AttachesMandatoryHeaders(t *testing.T) {
 
 	conn := restCallConnector(t, srv, aliasconfig.Endpoint{Alias: "get-app", Method: "GET", PathTemplate: "/apps/{id}"})
 
-	ctx := shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+	ctx := shared.WithLaneDepartment(callerCtx(), "lane-dept")
+	ctx = shared.WithDepartments(ctx, []string{"dept-1:reviewer"})
 	out, err := conn.Execute(ctx, map[string]any{
 		"endpointAlias": "get-app",
 		"pathParams":    map[string]any{"id": "42"},
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, testInternalToken, gotToken)
-	assert.Equal(t, "dept-1:reviewer", gotDepartments)
+	assert.Equal(t, testInternalToken, got.Get("x-internal-token"))
+	assert.Equal(t, "tenant-1", got.Get("x-tenant-id"))
+	assert.Equal(t, "principal-sub", got.Get("x-user-id"))
+	assert.Equal(t, "lane-dept", got.Get("x-workflow-department-id"))
+	assert.Empty(t, got.Values("x-departments"), "a connector call carries no department grant")
+	for _, h := range []string{"x-tenant-roles", "x-plan", "x-feature-flags", "x-residency-mode"} {
+		assert.Empty(t, got.Values(h), h)
+	}
 	assert.EqualValues(t, http.StatusOK, out["status"])
 }
 
-func TestRestCall_MissingDepartments_FailsClosedBeforeAnyRequest(t *testing.T) {
+func TestRestCall_MissingCallerIdentity_FailsClosedBeforeAnyRequest(t *testing.T) {
 	t.Parallel()
 
 	called := false
@@ -61,12 +67,18 @@ func TestRestCall_MissingDepartments_FailsClosedBeforeAnyRequest(t *testing.T) {
 
 	conn := restCallConnector(t, srv, aliasconfig.Endpoint{Alias: "get-app", Method: "GET", PathTemplate: "/apps/{id}"})
 
-	_, err := conn.Execute(context.Background(), map[string]any{
-		"endpointAlias": "get-app",
-		"pathParams":    map[string]any{"id": "42"},
-	})
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, shared.ErrMissingInternalAuth))
+	for name, ctx := range map[string]context.Context{
+		"nothing":          context.Background(),
+		"departments only": shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"}),
+		"tenant only":      shared.WithTenant(context.Background(), "tenant-1"),
+	} {
+		_, err := conn.Execute(ctx, map[string]any{
+			"endpointAlias": "get-app",
+			"pathParams":    map[string]any{"id": "42"},
+		})
+		require.Error(t, err, name)
+		assert.True(t, errors.Is(err, shared.ErrMissingInternalAuth), name)
+	}
 	assert.False(t, called)
 }
 
@@ -81,7 +93,7 @@ func TestRestCall_UnknownAlias_NoNetworkCall(t *testing.T) {
 
 	conn := restCallConnector(t, srv, aliasconfig.Endpoint{Alias: "known", Method: "GET", PathTemplate: "/x"})
 
-	ctx := shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+	ctx := shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	_, err := conn.Execute(ctx, map[string]any{"endpointAlias": "unknown"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, aliasconfig.ErrUnknownAlias))
@@ -98,7 +110,7 @@ func TestRestCall_NonSuccessStatus_ReturnsUpstreamError(t *testing.T) {
 
 	conn := restCallConnector(t, srv, aliasconfig.Endpoint{Alias: "get-app", Method: "GET", PathTemplate: "/apps"})
 
-	ctx := shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+	ctx := shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	_, err := conn.Execute(ctx, map[string]any{"endpointAlias": "get-app"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrUpstream))
@@ -115,7 +127,7 @@ func TestRestCall_AppliesQueryParams(t *testing.T) {
 
 	conn := restCallConnector(t, srv, aliasconfig.Endpoint{Alias: "list-apps", Method: "GET", PathTemplate: "/apps"})
 
-	ctx := shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+	ctx := shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	_, err := conn.Execute(ctx, map[string]any{
 		"endpointAlias": "list-apps",
 		"queryParams":   map[string]any{"status": "active"},
@@ -132,7 +144,7 @@ func TestRestCall_MissingPathParam(t *testing.T) {
 
 	conn := restCallConnector(t, srv, aliasconfig.Endpoint{Alias: "get-app", Method: "GET", PathTemplate: "/apps/{id}"})
 
-	ctx := shared.WithDepartments(context.Background(), []string{"dept-1:reviewer"})
+	ctx := shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	_, err := conn.Execute(ctx, map[string]any{"endpointAlias": "get-app"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, shared.ErrValidation))

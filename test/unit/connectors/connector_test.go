@@ -41,10 +41,6 @@ func TestNew_RequiresInternalToken(t *testing.T) {
 	require.Error(t, err)
 }
 
-// execution_service's cmd/connector-worker calls connectors.WithDepartments
-// and reads it back via connectors.DepartmentsFromContext directly (not
-// through pkg/connectors/shared, which it doesn't import) — root must keep
-// forwarding to the same context key shared's own callers use.
 func TestWithDepartments_RoundTripsThroughDepartmentsFromContext(t *testing.T) {
 	t.Parallel()
 
@@ -52,6 +48,18 @@ func TestWithDepartments_RoundTripsThroughDepartmentsFromContext(t *testing.T) {
 	departments, ok := connectors.DepartmentsFromContext(ctx)
 	require.True(t, ok)
 	assert.Equal(t, []string{"dept-1:reviewer"}, departments)
+}
+
+func TestCallerIdentity_RoundTripsThroughTheRootPackage(t *testing.T) {
+	t.Parallel()
+
+	ctx := connectors.WithLaneDepartment(connectors.WithActor(context.Background(), "principal-sub"), "lane")
+	actor, ok := connectors.ActorFromContext(ctx)
+	require.True(t, ok)
+	assert.Equal(t, "principal-sub", actor)
+	lane, ok := connectors.LaneDepartmentFromContext(ctx)
+	require.True(t, ok)
+	assert.Equal(t, "lane", lane)
 }
 
 func TestDepartmentsFromContext_NotSet_NotOK(t *testing.T) {

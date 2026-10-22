@@ -259,7 +259,7 @@ func flakyService(t *testing.T, failures int32) (*httptest.Server, *atomic.Int32
 // alias is not (the service may have acted on it).
 func TestWorker_RestCall503_DecidedByOutputMethod(t *testing.T) {
 	t.Parallel()
-	ctx := connectors.WithDepartments(context.Background(), []string{"dept:reviewer"})
+	ctx := connectors.WithActor(connectors.WithTenant(context.Background(), "tenant-1"), "principal-sub")
 	for method, want := range map[string]struct {
 		attempts int
 		ok       bool
