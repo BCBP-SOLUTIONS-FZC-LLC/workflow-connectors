@@ -21,13 +21,13 @@ pkg/
     │                             #       HTTP helpers, ClientCache, tenant/departments context, Google key check
     ├── aliasconfig/              # rest-call / sql-query alias schema, Load + Validate, ResolveEndpoint / ResolveQuery
     ├── storage/                  # core: fetch / upload / delete, createDocument, inline content, client cache, mock
-    │   ├── gocloud/              #   adapter: aws-s3, azure-blob, gcp-gcs (gocloud.dev/blob)
+    │   ├── gocloud/              #   adapter: aws-s3, azure-blob, gcp-gcs (gocloud.dev/blob; SDK retries off, unaddressable keys refused)
     │   └── googledrive/          #   adapter: google-drive (Drive v3) on a documents.Store
     ├── sendemail/                # core: validation, attachments, send intents, outcome classification (outcome.go), mock
     │   ├── ses/                  #   adapter: aws-ses (sesv2, SDK retries off)
     │   ├── sendgrid/             #   adapter: sendgrid (requests built per call, POST /v3/mail/send)
     │   ├── msgraph/              #   adapter: microsoft-365 (Graph sendMail, client credentials)
-    │   └── gmail/                #   adapter: google-workspace (Gmail API, raw MIME in mime.go)
+    │   └── gmail/                #   adapter: google-workspace (Gmail API media upload of the MIME message built in mime.go)
     ├── restcall/                 # core: alias-only internal HTTP calls
     ├── chatnotify/               # core: create-channel / invite-to-channel / post-message on an injected client, mock
     ├── sqlquery/                 # core: alias-only internal query service call (experimental, not wired into New)
@@ -48,13 +48,15 @@ test/                             # black-box tests, same module as the library 
                                   #   multireplica/, s3content/, valkeystore/ (incl. cluster_test.go, acl_replay_test.go)
 tools/go.mod                      # second module: golangci-lint as a `tool` dependency
 scripts/                          # merge_coverage.py (suite profiles → coverage.out), init-floci.sh (dev bucket),
-                                  # docs_check.py (make docs-check), docs_compile.sh (make docs-compile)
+                                  # docs_check.py (make docs-check), docs_compile.sh (make docs-compile),
+                                  # valkey-cluster.sh (PID 1 of the cluster profile's container)
 docker-compose.yml                # postgres 17, pgbouncer (transaction mode), valkey 8 (AOF, noeviction), floci S3;
-                                  # profile valkey-cluster: 3 Valkey masters on 57001–57003 (make docker-up enables it)
+                                  # profile valkey-cluster: 3 Valkey masters + 3 replicas on WC_VALKEY_CLUSTER_PORTS
+                                  #   (57001–57006; make docker-up enables it)
 docs/                             # architecture/ (README + mermaid/*.mmd), integration/, lld/, runbooks/
 ```
 
-White-box tests stay next to the code only where they need unexported identifiers: `pkg/connectors/connector_internal_test.go`, `pkg/registry/registry_internal_test.go`, `pkg/connectors/shared/clientcache_test.go`, `pkg/connectors/docref/valkeystore/{durability,redirect}_test.go`, `pkg/connectors/documents/sqlstore/errortext_test.go`, `pkg/connectors/sendemail/record_internal_test.go`, `pkg/connectors/storage/base64size_test.go`, and the adapter packages' `*_test.go` (`storage/gocloud`, `storage/googledrive`, `sendemail/{gmail,msgraph,sendgrid,ses}`; `gocloud/facade_test.go` and `googledrive/facade_test.go` hold `TestREG15` / `TestREG13`).
+White-box tests stay next to the code only where they need unexported identifiers: `pkg/connectors/connector_internal_test.go`, `pkg/registry/registry_internal_test.go`, `pkg/connectors/shared/clientcache_test.go`, `pkg/connectors/docref/valkeystore/{durability,redirect}_test.go`, `pkg/connectors/documents/sqlstore/errortext_test.go`, `pkg/connectors/sendemail/{record,presend}_internal_test.go`, `pkg/connectors/storage/base64size_test.go`, and the adapter packages' `*_test.go` (`storage/gocloud`, `storage/googledrive`, `sendemail/{gmail,msgraph,sendgrid,ses}`; `gocloud/facade_test.go` and `googledrive/facade_test.go` hold `TestREG15` / `TestREG13`).
 
 ## Runtime Dependencies (what every consumer inherits)
 
@@ -63,7 +65,7 @@ White-box tests stay next to the code only where they need unexported identifier
 | `github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/v2` v2.0.1 | `documents/sqlstore`, `sendintent/sqlstore` | pool, `RunInTx`, `ErrNoRows`, SQLSTATE helpers, `migrate.Runner` |
 | `github.com/redis/go-redis/v9` v9.22.0 | `docref/valkeystore` | Valkey metadata store |
 | `github.com/aws/aws-sdk-go-v2` (+ `credentials`, `service/s3`, `service/sesv2`) | `docref/s3content`, `storage/gocloud`, `sendemail/ses` | S3 document content, tenant S3 buckets, SES |
-| `gocloud.dev` v0.46.0, `github.com/Azure/azure-sdk-for-go/sdk/storage/azblob` v1.8.0 + `sdk/azcore` v1.22.0 | `storage/gocloud` | portable blob access (S3, Azure, GCS); `azcore.ResponseError` / `bloberror` for status classification and delete checks |
+| `gocloud.dev` v0.46.0, `github.com/Azure/azure-sdk-for-go/sdk/storage/azblob` v1.8.0 + `sdk/azcore` v1.22.0, `cloud.google.com/go/storage` v1.61.3 | `storage/gocloud` | portable blob access (S3, Azure, GCS); `azcore.ResponseError` / `bloberror` for status classification and delete checks; the GCS client is built directly to set `RetryNever` (it honours `STORAGE_EMULATOR_HOST`: the worker must never set it; `gcp-gcs` refuses to build a client while it is set) |
 | `google.golang.org/api` v0.293.0 | `storage/googledrive` (`drive/v3`), `sendemail/gmail` (`gmail/v1`) | Drive and Gmail APIs |
 | `golang.org/x/oauth2` v0.37.0 | `storage/gocloud` (GCS), `storage/googledrive`, `sendemail/gmail`, `sendemail/msgraph` (`clientcredentials`) | OAuth token sources |
 | `github.com/sendgrid/sendgrid-go` | `sendemail/sendgrid` | message model (`helpers/mail`) |
@@ -90,7 +92,7 @@ White-box tests stay next to the code only where they need unexported identifier
 | `docref_s3content` | `docref/s3content` | `docref` | `aws-sdk` |
 | `send_intents` | `pkg/connectors/sendintent` | `shared` | `uuid` |
 | `send_intents_sqlstore` | `sendintent/sqlstore` | `send_intents`, `shared` | `pgcommon` |
-| `provider_adapters` | `storage/{gocloud,googledrive}`, `sendemail/{ses,sendgrid,msgraph,gmail}` | `connector_core`, `documents`, `shared` | `uuid`, `aws-sdk`, `azure-sdk`, `gocloud`, `google-api`, `oauth2`, `sendgrid` |
+| `provider_adapters` | `storage/{gocloud,googledrive}`, `sendemail/{ses,sendgrid,msgraph,gmail}` | `connector_core`, `documents`, `shared` | `uuid`, `aws-sdk`, `azure-sdk`, `gocloud`, `google-api`, `gcs-sdk` (`cloud.google.com/go/storage`), `oauth2`, `sendgrid` |
 | `connectors` (facade) | `pkg/connectors` | `connector_core`, `shared`, `aliasconfig`, `registry`, `send_intents`, `docref` | none |
 
 Consequences: no core imports a cloud SDK; the facade never imports an adapter, a `sqlstore`, `valkeystore` or `s3content`; `pgx` is **not** a declared vendor, so a direct `pgx` import fails arch-lint.

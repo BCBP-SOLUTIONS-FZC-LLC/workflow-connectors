@@ -21,6 +21,8 @@ Classification is deterministic: the same error always gets the same class, and 
 | Object or file not found on fetch (S3 `NoSuchKey`, HTTP 404, Drive file missing); a `delete` of a missing object or file succeeds (idempotent) | Permanent | No | Check the key or name the workflow passes |
 | `delete` against a missing bucket or container, or the wrong S3 region (only a missing **object** counts as already deleted) | Permanent | No | Fix the bucket or region in the task or credential |
 | Azure account host (`<account>.blob.core.windows.net`) that does not resolve (NXDOMAIN) | Unknown | No | Check the account name; if it is right, check private-endpoint / split-horizon DNS, then re-run the task |
+| Storage key gocloud cannot address (`aws-s3` / `gcp-gcs`: a control character or `../`; `azure-blob` also `"` `#` `%` `?` `\` DEL or a trailing `/`) | Permanent (invalid input, `ErrValidation`; refused before any request) | No | Rename the object, or pass a key without those characters |
+| `azure-blob` `delete` of a blob that has snapshots (409 `SnapshotsPresent`) | Permanent | No | Delete the snapshots (or the blob with its snapshots) outside the connector, then re-run the task; the connector never deletes snapshots |
 | Access denied (S3 `AccessDenied`, HTTP 401/403) | Permanent | No | Fix the credential's permissions (`aws-s3`: see the S3 permissions below) |
 | Document ref expired or unknown, its S3 object missing, or the object altered | Permanent | No | Re-run the step that produced the ref |
 | Email rejected (invalid recipient, unverified sender, HTTP 4xx) | Permanent | No | Fix the address or the sender setup |
@@ -77,11 +79,17 @@ AWS error codes (from any error exposing `ErrorCode()`) are checked first, befor
 
 **Permissions.** A tenant's `aws-s3` credential needs `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on the objects **and `s3:ListBucket` on the bucket**. gocloud deletes an object by reading its attributes first (`HeadObject`), and S3 answers a credential without `s3:ListBucket` with **403 instead of 404** for a missing object, so without it a `delete` of an already-deleted object (a retry after a lost response, or an object removed elsewhere) fails as access denied instead of succeeding idempotently. The delete error on a 403 says so (`access denied: the aws-s3 credential needs … s3:ListBucket on the bucket …`); the `HeadBucket` bucket check below needs `s3:ListBucket` too.
 
+### Storage SDK retries, timeouts and keys (storage `aws-s3`, `azure-blob`, `gcp-gcs`)
+
+The library never retries: each SDK is configured for a single attempt (S3 `aws.NopRetryer`, Azure `MaxRetries: -1`, GCS `storage.RetryNever`), so a 503 is one request, returned with its class for `DecideRetry`. Each provider client has its own transport, bounds every request by `shared.ProviderHTTPTimeout` (2 min; a call's earlier deadline wins) and never follows a redirect.
+
+gocloud's drivers rewrite some key characters to `__0xNN__` hex escapes, so such a key would read, write or delete a *different* object (and a `delete` would "succeed" on a name that does not exist). The adapter refuses them as `ErrValidation`, naming the character, before any request: on every provider a control character or `../` anywhere in the key; on `azure-blob` also `"`, `#`, `%`, `?`, `\`, DEL and a trailing `/`. A blob such as `Invoice #123.pdf` on Azure cannot be read through the connector; rename it.
+
 ### Azure Blob and GCS (storage `azure-blob`, `gcp-gcs`)
 
 The adapter reads the HTTP status from Azure's `*azcore.ResponseError` and GCS's `*googleapi.Error` and classifies it with the HTTP table below (408, 425, 429 and 500/502/503/504 transient; 403 and other 4xx permanent). An Azure account host (`*.blob.core.windows.net`) that does not resolve (NXDOMAIN) is **unknown**, not permanent: it usually means a misspelt account name, but a private-endpoint or split-horizon DNS outage answers NXDOMAIN for a real account too. Unknown is never retried automatically; a person checks the name and DNS and re-runs the task.
 
-`delete` succeeds on a missing object only: S3 `NoSuchKey`, or a bare 404 with the bucket confirmed by `HeadBucket` (label `aws-s3 bucket check (HeadBucket)`); Azure `BlobNotFound`; GCS a 404 with the bucket confirmed by listing at most one object (`storage.objects.list`, granted by every object role; label `gcp-gcs bucket check (objects.list)`). The GCS error message is never relied on. A missing bucket or container, a wrong region (S3 301) or a 403 is an error with its own class; a bucket check that fails is the delete's error, with the check's own class (a missing bucket permanent, a 503 transient).
+`delete` succeeds on a missing object only: S3 `NoSuchKey`, or a bare 404 with the bucket confirmed by `HeadBucket` (label `aws-s3 bucket check (HeadBucket)`); Azure `BlobNotFound`; GCS a 404 with the bucket confirmed by listing at most one object (`storage.objects.list`, granted by every object role; label `gcp-gcs bucket check (objects.list)`). The GCS error message is never relied on. A missing bucket or container, a wrong region (S3 301) or a 403 is an error with its own class; a bucket check that fails is the delete's error, with the check's own class (a missing bucket permanent, a 503 transient). An Azure blob with snapshots (409 `SnapshotsPresent`) is never deleted with them: the error is permanent and says to delete the snapshots, or the blob with its snapshots, outside the connector.
 
 gocloud's portable code, used when no provider code or status decided:
 
@@ -99,7 +107,7 @@ gocloud's portable code, used when no provider code or status decided:
 | Document upload in progress (`documents.InProgressError`) | Transient |
 | Document registry and send intents (PostgreSQL, `documents/sqlstore`, `sendintent/sqlstore`): serialization failure (`40001`), deadlock (`40P01`), lock not available (`55P03`), query canceled / statement timeout (`57014`), operator intervention (class `57`), connection exception (class `08`), insufficient resources (class `53`), claim contention with a concurrent delete | Transient |
 | Document registry: pool closed (the worker is shutting down; another replica can run the task) | Unknown |
-| File not found on fetch: no recorded file, and no file tagged with the document or untagged file of the name (a recorded file deleted outside the connector falls back to those, as a re-upload does) | Permanent |
+| File not found on fetch: no recorded file, and no file tagged with the document or untagged file of the name (a recorded file deleted, trashed or moved out of the folder outside the connector falls back to those, as a re-upload does; checked with one `files.get` of `trashed,parents`) | Permanent |
 | Any other status | HTTP table below |
 
 ### HTTP (rest-call, sql-query, and any provider status)

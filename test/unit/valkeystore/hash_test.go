@@ -41,6 +41,8 @@ func TestGet_HashChecks(t *testing.T) {
 	other := docref.NewID()
 	malformed := refHash(id, "t")
 	malformed["size"] = "one"
+	otherMalformed := refHash(id, "t2")
+	otherMalformed["size"] = "one"
 
 	for name, tc := range map[string]struct {
 		fields    map[string]string
@@ -51,6 +53,10 @@ func TestGet_HashChecks(t *testing.T) {
 		"other tenant":     {fields: refHash(id, "t2")},
 		"other ref's hash": {fields: refHash(other, "t")},
 		"malformed size":   {fields: malformed, integrity: true},
+		// The tenant is compared before anything else is decoded: another
+		// tenant's corrupt ref is not found too, not an integrity
+		// violation that would reveal it exists.
+		"other tenant, malformed": {fields: otherMalformed},
 	} {
 		c := fakeClient(t, func(args []string) string {
 			if args[0] == "HGETALL" {

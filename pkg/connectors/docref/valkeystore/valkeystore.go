@@ -268,7 +268,8 @@ func (s *Store) Put(ctx context.Context, ref docref.Ref) (docref.Ref, error) {
 // one connection — preceded by ASKING when following an ASK redirect (it
 // lets the importing node of a migrating slot serve the key). A refused
 // ASKING (a user without +asking: NOPERM) is reported as the put's error,
-// so the missing grant surfaces instead of the redirect it causes.
+// so the missing grant surfaces instead of the redirect it causes (see
+// askingError).
 func (s *Store) putOn(ctx context.Context, node *redis.Client, asking bool, key string, args []any) (put, wait *redis.Cmd) {
 	var ask *redis.Cmd
 	_, _ = node.Pipelined(ctx, func(p redis.Pipeliner) error {
@@ -279,10 +280,28 @@ func (s *Store) putOn(ctx context.Context, node *redis.Client, asking bool, key 
 		wait = p.Do(ctx, "WAITAOF", 1, s.opts.WaitReplicas, s.opts.WaitAOFTimeout.Milliseconds())
 		return nil
 	})
-	if ask != nil && ask.Err() != nil {
-		put.SetErr(fmt.Errorf("ASKING: %w", ask.Err()))
+	if ask != nil {
+		if err := askingError(ask, put); err != nil {
+			put.SetErr(err)
+		}
 	}
 	return put, wait
+}
+
+// askingError is the error that replaces cmd's when the ASKING sent before
+// it was refused: only a server reply refusing ASKING (NOPERM, LOADING, …)
+// and only when cmd itself failed — then cmd's error is the ASK redirect the
+// refusal caused, which hides the cause. A connection failure fails both
+// commands with the same error, and a cmd that succeeded keeps its result:
+// in both cases cmd's own outcome is reported (nil is returned).
+func askingError(ask *redis.Cmd, cmd redis.Cmder) error {
+	if cmd.Err() == nil {
+		return nil
+	}
+	if _, reply := errors.AsType[redis.Error](ask.Err()); !reply {
+		return nil
+	}
+	return fmt.Errorf("ASKING: %w", ask.Err())
 }
 
 // follow returns the node a cluster redirect (MOVED or ASK) sends the
@@ -296,8 +315,9 @@ func (s *Store) putOn(ctx context.Context, node *redis.Client, asking bool, key 
 // another connection).
 //
 // MOVED means the client's slot map is stale: it is reloaded once —
-// synchronously, and only if no other operation reloaded it since this one
-// started, so a burst of MOVED replies costs one CLUSTER SLOTS — and the
+// synchronously, and only if the map still names from and no other
+// operation's reload started after this one did (one in progress is waited
+// for), so a burst of MOVED replies costs one CLUSTER SLOTS — and the
 // command goes to the key's master in the new map (no address matching). A
 // map that still names from (the reload failed or lags) is not followed.
 //
@@ -327,6 +347,9 @@ func (s *Store) follow(ctx context.Context, err error, from *redis.Client, key s
 	if _, ok := redis.IsMovedError(err); !ok {
 		return nil, false
 	}
+	if node, err := c.MasterForKey(ctx, key); err == nil && node != from {
+		return node, false // another operation's reload already moved the slot
+	}
 	s.masters.refresh(ctx, c, started, 0)
 	node, err = c.MasterForKey(ctx, key)
 	if err != nil || node == from {
@@ -342,10 +365,18 @@ const askRefreshInterval = time.Second
 // masterCache maps the cluster's master addresses to their clients, so an
 // ASK target is found without a slot-map reload per redirect.
 type masterCache struct {
-	refreshing sync.Mutex // one refresh at a time: the others reuse its result
-	mu         sync.Mutex // guards byAddr and loadedAt
-	byAddr     map[string]*redis.Client
-	loadedAt   time.Time
+	mu     sync.Mutex // guards every field
+	byAddr map[string]*redis.Client
+	// loadedAt is when the last successful refresh started (zero: none, or
+	// forgotten). A refresh that started after an operation did reflects
+	// the cluster as it was when that operation saw a redirect, or later.
+	loadedAt time.Time
+	// running is closed when the refresh in progress ends; nil when none
+	// is: one refresh at a time, the others wait for its result.
+	running chan struct{}
+	// generation counts forget calls: a refresh that started before one
+	// does not store its result.
+	generation uint64
 }
 
 // lookup returns the master at addr, refreshing the cache on a miss.
@@ -364,33 +395,74 @@ func (m *masterCache) get(addr string) *redis.Client {
 	return m.byAddr[addr]
 }
 
-// forget empties the cache: the next lookup refreshes it.
+// forget empties the cache: the next lookup refreshes it, and a refresh
+// already running does not store its (possibly stale) result.
 func (m *masterCache) forget() {
 	m.mu.Lock()
 	m.byAddr, m.loadedAt = nil, time.Time{}
+	m.generation++
 	m.mu.Unlock()
 }
 
 // refresh reloads the slot map (ForEachMaster reloads it synchronously) and
-// rebuilds the cache from its masters — unless another operation refreshed
-// it after since, or it was refreshed less than minAge ago.
+// rebuilds the cache from its masters — unless a refresh that started after
+// since succeeded, or the last successful one started less than minAge ago.
+//
+// One refresh runs at a time; the others wait for it, each only as long as
+// its own context allows (a waiter whose context ends returns at once, with
+// the cache as it is). A waiter reuses the result of the refresh it waited
+// for if that refresh succeeded; if it failed, the waiter tries again.
 func (m *masterCache) refresh(ctx context.Context, c *redis.ClusterClient, since time.Time, minAge time.Duration) {
-	// A waiter is bounded by the refresh it waits for, itself bounded by
-	// that caller's context and the client's timeouts.
-	m.refreshing.Lock()
-	defer m.refreshing.Unlock()
-	m.mu.Lock()
-	loadedAt := m.loadedAt
-	m.mu.Unlock()
-	if loadedAt.After(since) || time.Since(loadedAt) < minAge {
-		return
+	for {
+		m.mu.Lock()
+		loadedAt := m.loadedAt
+		if loadedAt.After(since) || time.Since(loadedAt) < minAge {
+			m.mu.Unlock()
+			return
+		}
+		running := m.running
+		if running == nil {
+			running = make(chan struct{})
+			m.running = running
+			generation := m.generation
+			m.mu.Unlock()
+			m.load(ctx, c, generation, running)
+			return
+		}
+		m.mu.Unlock()
+		select {
+		case <-running:
+		case <-ctx.Done():
+			return
+		}
+		m.mu.Lock()
+		succeeded := m.loadedAt.After(loadedAt)
+		m.mu.Unlock()
+		if succeeded {
+			return
+		}
 	}
+}
+
+// load is one refresh: it rebuilds the cache from the masters of a freshly
+// loaded slot map and closes done. It records the refresh as fresh
+// (loadedAt, the time it started) only if it succeeded.
+func (m *masterCache) load(ctx context.Context, c *redis.ClusterClient, generation uint64, done chan struct{}) {
+	started := time.Now()
 	var mu sync.Mutex
 	byAddr := map[string]*redis.Client{}
-	// ForEachMaster falls back on the current map when the reload fails; it
-	// errs only when there is no map at all (then byAddr stays empty and
-	// the ASK is not followed) or when fn does, which it never does.
-	_ = c.ForEachMaster(ctx, func(_ context.Context, master *redis.Client) error {
+	defer func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.running = nil
+		close(done)
+	}()
+	// ForEachMaster falls back on the current map when the reload fails
+	// (for instance when ctx ends during it); it errs only when there is no
+	// map at all or when fn does, which it never does. A reload cut short
+	// by ctx therefore still yields the old map: usable for this lookup, but
+	// not recorded as fresh, so the next miss reloads again.
+	err := c.ForEachMaster(ctx, func(_ context.Context, master *redis.Client) error {
 		// NodeAddress is the address the cluster announces (the one in a
 		// redirect); Addr may be rewritten from it by the client.
 		opt := master.Options()
@@ -403,8 +475,14 @@ func (m *masterCache) refresh(ctx context.Context, c *redis.ClusterClient, since
 		return nil
 	})
 	m.mu.Lock()
-	m.byAddr, m.loadedAt = byAddr, time.Now()
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	if err != nil || len(byAddr) == 0 || generation != m.generation {
+		return
+	}
+	m.byAddr = byAddr
+	if ctx.Err() == nil {
+		m.loadedAt = started
+	}
 }
 
 // normAddr is addr as host:port with a lower-case host, so the same node
@@ -455,8 +533,21 @@ var busyPrefixes = []string{"BUSY ", "max number of clients reached"}
 // slot is being migrated — so it reloads nothing. A standalone or Sentinel
 // client has no slot map; Sentinel's failover client finds the new primary
 // itself.
+//
+// A cluster node that fails without any reply — connection refused or
+// reset, an i/o timeout: a master that died — reloads the slot map too
+// (see nodeFailed). This decides nothing about the class: such errors are
+// classified by their cause (shared.ClassifyCause) like any network error.
 func (s *Store) transient(ctx context.Context, err error) bool {
 	c, cluster := s.client.(*redis.ClusterClient)
+	if cluster && nodeFailed(ctx, err) {
+		// The cluster client's own commands mark a failing node and reload
+		// the slot map; these run on the node's client directly, which does
+		// neither, so a dead master would stay in the map until the next
+		// periodic reload. ReloadState is asynchronous and deduplicated.
+		c.ReloadState(ctx)
+		s.masters.forget()
+	}
 	for _, prefix := range topologyPrefixes {
 		// HasErrorPrefix matches a server reply however it is wrapped.
 		if redis.HasErrorPrefix(err, prefix) {
@@ -479,6 +570,16 @@ func (s *Store) transient(ctx context.Context, err error) bool {
 	}
 	return redis.IsReadOnlyError(err) || redis.IsOOMError(err) || redis.IsNoReplicasError(err) ||
 		redis.IsMaxClientsError(err) || errors.Is(err, redis.ErrPoolTimeout)
+}
+
+// nodeFailed reports a failure of the node itself rather than a refusal:
+// no server reply in err's chain, and not the caller's own cancellation or
+// deadline (which says nothing about the node).
+func nodeFailed(ctx context.Context, err error) bool {
+	if _, reply := errors.AsType[redis.Error](err); reply {
+		return false
+	}
+	return ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // errUnsupportedClient refuses a client this store cannot address one node of.
@@ -508,7 +609,7 @@ func (s *Store) nodeFor(ctx context.Context, key string) (*redis.Client, error) 
 
 // onNode runs cmd on node, preceded by ASKING on the same connection when
 // asking is set. A refused ASKING (NOPERM: the user lacks +asking) becomes
-// cmd's error.
+// cmd's error when cmd failed (see askingError).
 func onNode[C redis.Cmder](ctx context.Context, node *redis.Client, asking bool, cmd func(redis.Cmdable) C) C {
 	if !asking {
 		return cmd(node)
@@ -520,8 +621,8 @@ func onNode[C redis.Cmder](ctx context.Context, node *redis.Client, asking bool,
 		c = cmd(p)
 		return nil
 	})
-	if err := ask.Err(); err != nil {
-		c.SetErr(fmt.Errorf("ASKING: %w", err))
+	if err := askingError(ask, c); err != nil {
+		c.SetErr(err)
 	}
 	return c
 }
@@ -555,12 +656,18 @@ func (s *Store) Get(ctx context.Context, tenantID, id string) (docref.Ref, bool,
 	if len(fields) == 0 {
 		return docref.Ref{}, false, nil // missing or expired
 	}
+	if fields["tenant_id"] != tenantID {
+		// Checked before anything else in the hash: another tenant's ref —
+		// even a corrupt one — reads as not found, so neither its existence
+		// nor its state is revealed.
+		return docref.Ref{}, false, nil
+	}
 	ref, err := decode(fields)
 	if err != nil {
 		// A hash this store cannot have written: corrupt or forged.
 		return docref.Ref{}, false, fmt.Errorf("%w: get %s: %w", docref.ErrIntegrityViolation, id, err)
 	}
-	if ref.TenantID != tenantID || ref.ID != Key(id) {
+	if ref.ID != Key(id) {
 		return docref.Ref{}, false, nil
 	}
 	return ref, true, nil

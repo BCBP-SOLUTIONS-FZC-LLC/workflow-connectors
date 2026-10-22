@@ -20,23 +20,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0] - 2026-10-13
 
-Production-readiness fixes from a review of the whole library. New exported API only (no signature changed; `make api-compat` is clean), so the next release is a MINOR. Some inputs that used to be accepted are now refused: read **Changed** before upgrading.
+Production-readiness fixes from a review of the whole library. New exported API only (no signature changed; `make api-compat` is clean), so the next release is a MINOR. Some inputs that used to be accepted are now refused: read **Changed** and **Removed** before upgrading.
 
-### Security
+### Added
 
-- **A google-drive delete could permanently delete a folder.** The by-name lookup matched subfolders, shortcuts and Google-native files. A delete with no registry row fell back to the oldest untagged same-name match and called `files.Delete`, which skips the trash and removes a folder's contents. Folders, shortcuts and `application/vnd.google-apps.*` files are now excluded from every lookup, so an upload never adopts one and a fetch never reads one.
-- **Internal calls ignore `HTTP_PROXY` / `HTTPS_PROXY`.** The default internal transport (nil client or nil transport) has no proxy, so `x-internal-token` and `x-departments` can no longer go through an egress proxy. A caller-supplied `*http.Transport` keeps its own proxy setting.
-- **Gmail MIME headers take only checked content types.** Attachment content types are normalised (`mime.ParseMediaType` / `FormatMediaType`, else `application/octet-stream`). The body `contentType` must be `text/plain` or `text/html` (the registry enum) for every provider.
-- **The SES `region` must be one DNS label** (`ErrValidation` otherwise), so it cannot point the signed request at another host.
-- **`aliasconfig` rejects a `baseURL` with a query or fragment.** Such a base URL put the path template into the query string.
-- **Deleting a tampered document ref no longer deletes the object its record names**, since that object may belong to another document. The record is removed (tenant-guarded) and the call returns nil.
-- **Documented:** `senderEmail` is not bound to the credential. Restrict Graph `Mail.Send` with an Exchange Application Access Policy, and keep Google domain-wide delegation narrow. A Drive folder must belong to one tenant.
+- **rest-call output `method`**, returned on every result once the request was sent. The worker passes it to `DecideRetry` instead of re-resolving the alias.
+- **`sendintent.Releaser`** (`Release(…) (released bool, err error)`), implemented by `MemoryStore` and `sqlstore.Store`, plus `ErrNotReserved`, `ErrNoToken` and `ReleasedDetail`.
+- **`PruneIntents(ctx, olderThan, batch)`** on both send-intent stores, plus `ErrPruneArgs`. Pruning a key reopens its duplicate window.
+- **`valkeystore.Options.Validate()` and `ErrInvalidOptions`.** A store with a negative `WaitReplicas` refuses every `Put` (not retried).
+- **Other new exports:** `shared.BaseTransport`, `shared.FormatScalarParam`, `shared.ReasonResponseTooLarge` (`restcall.ReasonResponseTooLarge` equals it), `registry.ChatNotifyDefinition` and `registry.Lookup`.
+- **CI:**
+  - `make docs-compile` (in `make ci` and validate-quality) compiles the worker skeleton in `docs/integration/connector-worker.md` (`GOWORK=off`, keeps the caller's `GOFLAGS`, copies the root module's `replace` lines).
+  - `arch-lint.sh` installs and verifies go-arch-lint v1.15.0 instead of trusting `PATH`.
+  - The Trivy DB cache key includes the date, so the cache is refreshed daily.
+
+### Changed
+
+- **Stricter input checks (all `ErrValidation`):**
+  - Storage refuses a `bucket` or `key` over 1024 bytes, not valid UTF-8, or containing a control character. An upload's size is checked before it is copied or base64-decoded.
+  - send-email `contentType` must be exactly `text/plain` or `text/html` (or empty): `text/html; charset=utf-8` or `TEXT/HTML` is now refused.
+  - send-email refuses a `messageKey` over 512 bytes, not valid UTF-8 or containing a control character, and a `resendAttempt` outside 1..2147483647.
+  - rest-call path and query parameters must be scalars (a list, map or nil is refused).
+  - A rest-call alias whose `pathTemplate` query does not parse (a bad escape such as `%zz`) is refused when the aliases are validated (`aliasconfig.Validate`, `connectors.New`), not only on calls that pass `queryParams`.
+  - sql-query `paramCount: 0` means no parameters, and non-list `params` is refused instead of silently dropped.
+  - Storage on `aws-s3` / `azure-blob` / `gcp-gcs` refuses a key gocloud would silently rewrite to a `__0xNN__` escape, before any request: a control character or `../` on every provider, and on `azure-blob` also `"` `#` `%` `?` `\` DEL and a trailing `/`. Such a key used to read or delete a different object (a delete "succeeding" on a nonexistent name).
+  - A rest-call alias `pathTemplate` containing `#` is refused when aliases are validated: everything after `#` was a fragment that is never sent, so `/x#?role=user` fixed no query key and a caller's `queryParams` could set `role` (write a literal `#` as `%23`). Also refused: a character not valid in a URL outside a placeholder, an unterminated `{`, and a `%` in the path part not followed by two hex digits (`/x/%{id}` rendered an encoded slash). `shared.NewInternalRequest` also refuses a path containing `#`.
+  - `shared.ApplyQueryParams` refuses an empty query parameter name.
+  - send-email refuses a `body` over 5 MiB and a `subject` over 998 bytes, before any intent is reserved.
+- **The S3, Azure and GCS storage clients no longer retry inside the SDK** (`aws.NopRetryer`, Azure `MaxRetries: -1`, GCS `RetryNever`): one request per call, and the worker decides with `DecideRetry`. Each client has its own transport, a 10-minute request timeout (2 minutes to the first response byte) and never follows a redirect. `cloud.google.com/go/storage` is now a direct dependency (same version, granted to the adapters in `.go-arch-lint.yml`). The GCS SDK honours `STORAGE_EMULATOR_HOST`, which would send every tenant's `gcp-gcs` traffic, unauthenticated, to that host: `gcp-gcs` now refuses to build a client while it is set. Storage requests are bounded at 10 minutes in total (enough for a 50 MiB object at about 0.7 Mbit/s) and 2 minutes to the first response byte.
+- **Gmail (google-workspace) uploads the message as `message/rfc822` through the media-upload endpoint** in one request. Attachments are limited to 17,000,000 raw bytes and the encoded message to 25,000,000 bytes (refused before sending, not delivered, permanent), down from 25 MiB raw, which could not fit once encoded. Long subjects are folded within RFC 5322's 998-character line limit.
+- **After the reservation, a send-email failure whose outcome cannot be recorded is always a `SendError` with `IntentUnrecorded`** (class unknown), including invalid input found after the reservation: `errors.Is(err, ErrValidation)` no longer matches there; the cause is in `SendError.Err`.
+- **An `azure-blob` delete of a blob with snapshots (409 `SnapshotsPresent`) explains** that the snapshots must be deleted outside the connector; it stays permanent and snapshots are never deleted.
+- **google-drive: a document with a recorded file never deletes an untagged same-name file** on delete.
+- **Valkey test cluster:** the `valkey-cluster` compose profile is 3 masters + 3 replicas on 57001–57006 (`WC_VALKEY_CLUSTER_PORTS`), with real tests for `CheckDurability` on every node and a `CLUSTER FAILOVER`.
+- **CI runs on `ubuntu-24.04`** (pinned; `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19). `VERSIONING.md` gains **What is not a breaking change**, which is why this release is a MINOR.
+- **`aliasconfig.Load` decodes YAML strictly.** An unknown key (a typo such as `timout:`) or a second document is an error, and `connectors.New` runs `Config.Aliases.Validate()`.
+- **A duplicate of an accepted email also returns `messageId` and `sentAt`** from the accepted attempt (`sent: false` and `duplicate: true` unchanged).
+- **`s3content.Store.Check` also puts and deletes an empty probe object** (random key) under the key prefix, so a missing `s3:PutObject` / `s3:DeleteObject` grant shows at startup.
+- **New send-intent migrations:** `000003` adds `CHECK (attempts >= 1)` `NOT VALID`; `000004` validates it (SHARE UPDATE EXCLUSIVE, so the ACCESS EXCLUSIVE lock is not held during the scan); `000005` adds the partial index `ix_connector_send_intents_prune` on `(updated_at) WHERE status <> 'pending'` for `PruneIntents` (a plain `CREATE INDEX`, SHARE lock while it builds; on a large table create it `CONCURRENTLY` by hand first).
+- **`docref.Service.Delete` of a tampered ref also deletes the ref's own canonical object** `<prefix><tenant>/<uuid>` (best effort), never the object the record names.
+- **`sql-query` and `document-extract` are marked experimental** and not for production: they have no tenant scoping, and document-extract's inline refs skip docref verification.
+- **Docs:**
+  - The Valkey key is written `docref:<uuid>`; the `{uuid}` form read as a cluster hash tag.
+  - The document-refs runbook states that the content bucket and key prefix are immutable while refs are live.
+  - Worker and database clocks need NTP (Drive lease deadlines).
+  - Migration `000002`'s index build locks a large audit table.
+  - LLD rev 1.18: `execution_service` runs the connector worker on this module's `v2.0.0` (OQ-14 and OQ-17 closed), the dropped open questions are struck through for future reference, the removed `call_pool` task is gone from §S5, and the Workflow team's sign-off is recorded in §16.1. No code or API change.
+  - LLD rev 1.19 describes this release (unreleased, next `v2.1.0`): every change listed in this section, the upgrade steps (§19.4) and OQ-18 (`chat-notify` leaving `registry.All()`); the §16.1 sign-off rows need re-signing before `v2.1.0`.
+
+### Deprecated
+
+- **`shared.FormatParam` is deprecated**: use `shared.FormatScalarParam`, which refuses a list, map or nil instead of rendering it.
+
+### Removed
+
+- **`registry.All()` no longer lists `chat-notify`.** It has no provider and no per-tenant credential, so authored steps could only fail. `connectors.New` still builds it, and `DecideRetry` still reads its `unsafe` policy (through `registry.Lookup`). **Upgrade:** in workflow-definition-service an existing chat-notify task now gets an `UNKNOWN_CONNECTOR_TYPE` publish warning (not an error), and its template and credential write/revoke endpoints are refused; tell its owners before upgrading.
 
 ### Fixed
 
+- **`TestStore_ConcurrentClaimAndRemoveCycles_NeverTwoRows` no longer fails on a busy runner.** Eight goroutines claiming and removing one Drive document can make a claim give up with the documented transient "claim contention" error (the worker retries it); the test now accepts that error and still asserts the real invariant, never two rows. Test-only; it failed the first CI run on `main` after PR #8.
+
+- **A database outage or a full pool no longer makes every send-email with a `messageKey` "unknown".** `sqlstore.Reserve` marks every failure before COMMIT was sent as `sendintent.ErrNotReserved` (no connection, BEGIN, transaction setup, the statement), so such a failure is a transient `not_delivered` that is retried. Only a failed or lost COMMIT stays ambiguous.
+- **send-email bounds the time between reserving an intent and calling the provider** to 11 min 50 s: a call past it sends nothing and records `not_delivered` (transient), so an intent can never become stale and resendable while its send may still be in flight.
+- **send-email records the outcome even when an error's `Error()` panics**, and a panic before the outcome is recorded is recorded by the panic guard.
+- **google-drive no longer writes to, reads or deletes a recorded file that was trashed or moved out of the folder** outside the connector: upload and fetch fall back as for a deleted file, delete leaves it alone (one extra `files.get` per recorded-file call).
+- **Storage `upload` with `createDocument: true` checks the document-ref service and the tenant before uploading**, instead of writing the object and then failing.
+- **A Valkey Cluster master that dies is replaced in the slot map at once**, not after go-redis's 60 s periodic reload: a node failure without a server reply schedules a reload and drops the cached master addresses. A failed masters-cache refresh is no longer recorded as fresh, and waiters for a refresh honour their own deadline. A refused `ASKING` replaces the command's error only when the command failed.
+- **`CheckDurability` treats only `NOPERM` and an unknown command or subcommand on `CONFIG GET` as `ErrConfigUnavailable`.** `WRONGPASS` (a replica missing the worker's ACL user), `LOADING`, `BUSY` and maxclients now fail the check instead of being tolerated.
+- **Migration `000005` rebuilds an invalid prune index** left by a failed `CREATE INDEX CONCURRENTLY`, keeps a valid one and creates a missing one.
+- **`aliasconfig.Load` ignores empty YAML documents anywhere** (leading or trailing, including `--- ~` and `--- null`); exactly one document may have content.
 - **Wrapping `http.DefaultTransport` no longer panics.** Wrappers such as `otelhttp` or `httpmock` made `connectors.New`, and every provider client build inside `Execute`, panic on an unchecked type assertion. Transports now come from `shared.BaseTransport()`.
 - **Storage delete succeeds only when the object is missing.** gocloud reports a missing bucket or container, a wrong S3 region, a GCS 403 and an unresolvable Azure account all as "not found", and delete reported success while nothing was deleted. Only S3 `NoSuchKey` (or a 404 with the bucket confirmed by `HeadBucket`), Azure `BlobNotFound` and a GCS 404 with the bucket confirmed by listing at most one object count now (the error message is never relied on); everything else is an error with its class, labelled with the provider's check. An S3 403 says the credential needs `s3:ListBucket`: without it S3 answers 403 rather than 404 for a missing object, so a repeated delete cannot succeed.
-- **Azure and GCS 408 / 429 / 5xx are transient.** They were unknown and never retried. The adapter reads the status from `azcore.ResponseError` and `googleapi.Error`. An Azure account host that does not resolve is unknown (usually a misspelt account, but private-endpoint DNS outages also return NXDOMAIN).
+- **Azure and GCS 408 / 429 / 5xx are transient.** They were unknown and never retried. The adapter reads the status from `azcore.ResponseError` and `googleapi.Error`. An Azure account host that does not resolve (NXDOMAIN) is unknown, not permanent: usually a misspelt account, but private-endpoint and split-horizon DNS outages also return NXDOMAIN for real accounts.
 - **google-drive fetch no longer reports "in progress" forever after a crash.** A busy row with an expired lease is read past. A live delete returns `InProgressError` instead of a permanent 404. A `FAILED` row with no file, or a recorded file deleted outside the connector, falls back to the tagged, then the untagged, same-name file, as delete and re-upload do.
 - **A redelivered send-email job for an accepted email succeeds as a duplicate even after its attachment refs expire.** The `messageKey` intent is now reserved before attachments are resolved, so a duplicate downloads nothing. An attachment failure after reserving records `not_delivered`. A missing or unconfigured `provider` is refused with the other input checks, before anything is reserved.
 - **An ambiguous `Reserve` failure no longer strands the intent.** Previously the retry hit a `pending` row and failed as a permanent duplicate, though nothing was sent. A failure that provably reserved nothing (`sendintent.ErrNotReserved`) keeps its class. Otherwise the row is read back and, unless it is this call's own pending reservation, released by its token (`sendintent.Releaser`). Only a release that actually freed this call's row lets the error keep its class; anything else (not found, nothing released, release failed) is class unknown, since under synchronous replication a commit can become visible later.
@@ -53,49 +108,21 @@ Production-readiness fixes from a review of the whole library. New exported API 
 - **`docref.Service.Create` also removes the metadata record** (best effort) when the metadata write failed or its outcome is unknown; the record and object deletes get separate 5 s budgets. **`Read` no longer preallocates from an untrusted recorded size**: a forged huge size used to panic.
 - **A rest-call 2xx response over 10 MiB keeps its output.** It returns `status`, `headers`, `method`, the first 10 MiB of the body, `bodyTruncated: true` and a permanent "response too large" error (`ErrUpstream` + `ErrTooLarge`). It used to be an invalid-input error with no output, so a POST that succeeded looked like bad input. sql-query fails the same way (permanent, not invalid input).
 - **`shared.ApplyQueryParams` keeps the alias's fixed query exactly as written** (valueless flags, order, escaping) and appends the caller's parameters after it. It parses the alias query strictly (`url.ParseQuery`; an unparsable query such as one with `%zz` is `ErrValidation`), and `aliasconfig.Validate` refuses a `;` in a `pathTemplate`'s query, so a fixed key after a `;` can no longer be sent twice.
-- **`aliasconfig.Load` accepts a file ending in an empty YAML document** (a trailing `---`, optionally with comments); a second document with content is still refused.
 - **`registry.Lookup` builds its definitions once** and returns a copy, instead of rebuilding `All()` on every failed task.
 - **`shared.ClientCache`:** a caller that loses the build race now counts as a recent use for eviction.
 - **Registry: storage and send-email `provider` are `Required`**, as their descriptions and LLD Decision #20 (no default) say.
 
-### Changed
+### Security
 
-- **`registry.All()` no longer lists `chat-notify`.** It has no provider and no per-tenant credential, so authored steps could only fail. `connectors.New` still builds it, and `DecideRetry` still reads its `unsafe` policy (through `registry.Lookup`). **Upgrade:** in workflow-definition-service an existing chat-notify task now gets an `UNKNOWN_CONNECTOR_TYPE` publish warning (not an error), and its template and credential write/revoke endpoints are refused; tell its owners before upgrading.
-- **Stricter input checks (all `ErrValidation`):**
-  - Storage refuses a `bucket` or `key` over 1024 bytes, not valid UTF-8, or containing a control character. An upload's size is checked before it is copied or base64-decoded.
-  - send-email `contentType` must be exactly `text/plain` or `text/html` (or empty): `text/html; charset=utf-8` or `TEXT/HTML` is now refused.
-  - send-email refuses a `messageKey` over 512 bytes, not valid UTF-8 or containing a control character, and a `resendAttempt` outside 1..2147483647.
-  - rest-call path and query parameters must be scalars (a list, map or nil is refused).
-  - A rest-call alias whose `pathTemplate` query does not parse (a bad escape such as `%zz`) is refused when the aliases are validated (`aliasconfig.Validate`, `connectors.New`), not only on calls that pass `queryParams`.
-  - sql-query `paramCount: 0` means no parameters, and non-list `params` is refused instead of silently dropped.
-- **`aliasconfig.Load` decodes YAML strictly.** An unknown key (a typo such as `timout:`) or a second document is an error, and `connectors.New` runs `Config.Aliases.Validate()`.
-- **A duplicate of an accepted email also returns `messageId` and `sentAt`** from the accepted attempt (`sent: false` and `duplicate: true` unchanged).
-- **`s3content.Store.Check` also puts and deletes an empty probe object** (random key) under the key prefix, so a missing `s3:PutObject` / `s3:DeleteObject` grant shows at startup.
-- **New send-intent migrations:** `000003` adds `CHECK (attempts >= 1)` `NOT VALID`; `000004` validates it (SHARE UPDATE EXCLUSIVE, so the ACCESS EXCLUSIVE lock is not held during the scan); `000005` adds the partial index `ix_connector_send_intents_prune` on `(updated_at) WHERE status <> 'pending'` for `PruneIntents` (a plain `CREATE INDEX`, SHARE lock while it builds; on a large table create it `CONCURRENTLY` by hand first).
-- **`docref.Service.Delete` of a tampered ref also deletes the ref's own canonical object** `<prefix><tenant>/<uuid>` (best effort), never the object the record names.
-- **Azure: an account host that does not resolve (NXDOMAIN) is unknown**, not permanent (private-endpoint / split-horizon DNS outages return NXDOMAIN for real accounts).
-- **`sql-query` and `document-extract` are marked experimental** and not for production: they have no tenant scoping, and document-extract's inline refs skip docref verification.
-- **Docs:**
-  - The Valkey key is written `docref:<uuid>`; the `{uuid}` form read as a cluster hash tag.
-  - The document-refs runbook states that the content bucket and key prefix are immutable while refs are live.
-  - Worker and database clocks need NTP (Drive lease deadlines).
-  - Migration `000002`'s index build locks a large audit table.
-
-### Added
-
-- **rest-call output `method`**, returned on every result once the request was sent. The worker passes it to `DecideRetry` instead of re-resolving the alias.
-- **`sendintent.Releaser`** (`Release(…) (released bool, err error)`), implemented by `MemoryStore` and `sqlstore.Store`, plus `ErrNotReserved`, `ErrNoToken` and `ReleasedDetail`.
-- **`PruneIntents(ctx, olderThan, batch)`** on both send-intent stores, plus `ErrPruneArgs`. Pruning a key reopens its duplicate window.
-- **`valkeystore.Options.Validate()` and `ErrInvalidOptions`.** A store with a negative `WaitReplicas` refuses every `Put` (not retried).
-- **Other new exports:** `shared.BaseTransport`, `shared.FormatScalarParam` (`shared.FormatParam` is deprecated), `shared.ReasonResponseTooLarge` (`restcall.ReasonResponseTooLarge` equals it), `registry.ChatNotifyDefinition` and `registry.Lookup`.
-- **CI:**
-  - `make docs-compile` (in `make ci` and validate-quality) compiles the worker skeleton in `docs/integration/connector-worker.md` (`GOWORK=off`, keeps the caller's `GOFLAGS`, copies the root module's `replace` lines).
-  - `arch-lint.sh` installs and verifies go-arch-lint v1.15.0 instead of trusting `PATH`.
-  - The Trivy DB cache key includes the date, so the cache is refreshed daily.
-
-### Documentation
-
-- LLD rev 1.18: `execution_service` runs the connector worker on this module's `v2.0.0` (OQ-14 and OQ-17 closed), the dropped open questions are struck through for future reference, the removed `call_pool` task is gone from §S5, and the Workflow team's sign-off is recorded in §16.1. No code or API change.
+- **A google-drive delete could permanently delete a folder.** The by-name lookup matched subfolders, shortcuts and Google-native files. A delete with no registry row fell back to the oldest untagged same-name match and called `files.Delete`, which skips the trash and removes a folder's contents. Folders, shortcuts and `application/vnd.google-apps.*` files are now excluded from every lookup, so an upload never adopts one and a fetch never reads one.
+- **Internal calls ignore `HTTP_PROXY` / `HTTPS_PROXY`.** The default internal transport (nil client or nil transport) has no proxy, so `x-internal-token` and `x-departments` can no longer go through an egress proxy. A caller-supplied `*http.Transport` keeps its own proxy setting.
+- **Gmail MIME headers take only checked content types.** Attachment content types are normalised (`mime.ParseMediaType` / `FormatMediaType`, else `application/octet-stream`). The body `contentType` must be `text/plain` or `text/html` (the registry enum) for every provider.
+- **The SES `region` must be one DNS label** (`ErrValidation` otherwise), so it cannot point the signed request at another host.
+- **`aliasconfig` rejects a `baseURL` with a query or fragment.** Such a base URL put the path template into the query string.
+- **Deleting a tampered document ref no longer deletes the object its record names**, since that object may belong to another document. The record is removed (tenant-guarded) and the call returns nil.
+- **Gmail and Microsoft 365 OAuth token requests never follow redirects** (own transport, HTTP/1.1, 30 s).
+- **A Valkey `Get` compares the tenant before decoding the record**, so another tenant's corrupt record reads as not found, never `ErrIntegrityViolation`.
+- **Documented:** `senderEmail` is not bound to the credential. Restrict Graph `Mail.Send` with an Exchange Application Access Policy, and keep Google domain-wide delegation narrow. A Drive folder must belong to one tenant.
 
 ## [2.0.0] - 2026-10-10
 

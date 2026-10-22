@@ -212,6 +212,14 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 	}
 	contentType := shared.StringField(input, "contentType")
 	fromRef := docref.IsRef(content)
+	createDocument := !fromRef && shared.BoolField(input, "createDocument")
+
+	// Everything the ref needs is checked before the upload, so a call that
+	// cannot create its ref fails without having written anything.
+	tenant, err := s.refTenant(ctx, fromRef || createDocument)
+	if err != nil {
+		return nil, err
+	}
 
 	// Every size is checked before the content is copied or decoded, so an
 	// oversized input never costs a second buffer of its size: a ref is read
@@ -219,10 +227,6 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 	// decoded size (the decoder never yields more).
 	var raw []byte
 	if fromRef {
-		tenant, err := s.refTenant(ctx, true)
-		if err != nil {
-			return nil, err
-		}
 		// Resolved from S3 and verified (size, SHA-256) before anything is
 		// uploaded.
 		ref, resolved, err := s.docRefs.Read(ctx, tenant, content, shared.MaxObjectBytes)
@@ -264,13 +268,9 @@ func (s *Connector) upload(ctx context.Context, client ProviderClient, bucket, k
 		// The uploaded bytes are the ref's verified bytes, so the same ref
 		// already resolves to them.
 		out["contentRef"] = content
-	case shared.BoolField(input, "createDocument"):
+	case createDocument:
 		// Opt-in, as for fetch: a plain upload stores nothing beyond the
 		// tenant's bucket, so it cannot fail after the upload succeeded.
-		tenant, err := s.refTenant(ctx, true)
-		if err != nil {
-			return nil, err
-		}
 		ref, err := s.docRefs.Create(ctx, tenant, contentType, raw)
 		if err != nil {
 			return nil, classifyRef("storage upload: create document ref", err)

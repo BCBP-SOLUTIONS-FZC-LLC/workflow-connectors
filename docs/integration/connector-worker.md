@@ -75,13 +75,15 @@ Details: [`docs/runbooks/document-refs.md`](../runbooks/document-refs.md).
 | `s3.<region>.amazonaws.com`, `<account>.blob.core.windows.net`, `storage.googleapis.com`, `www.googleapis.com` + `oauth2.googleapis.com` | `storage` providers |
 | Internal services named in the alias registry | `rest-call` (and `sql-query` once wired) |
 
-Provider clients never follow redirects and speak HTTP/1.1 only, so a proxy must not require HTTP/2. They honour `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` like Go's default transport.
+Provider clients — the S3, Azure and GCS clients and the Gmail / Graph OAuth token requests included — never follow redirects and speak HTTP/1.1 only, so a proxy must not require HTTP/2. They honour `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` like Go's default transport.
 
 Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient` nil (or a client whose `Transport` is nil) the internal transport has `Proxy` unset, so `x-internal-token` and the caller identity cannot reach an egress proxy named by `HTTP_PROXY` / `HTTPS_PROXY`. A worker that passes its own `*http.Transport` keeps that transport's `Proxy` setting and must not point it at a proxy outside the platform.
 
 ## 3. Configuration
 
-The library reads no environment variables. The worker reads these and passes the results in.
+The library reads no environment variables (one SDK it builds does: see `STORAGE_EMULATOR_HOST` below). The worker reads these and passes the results in.
+
+**Never set `STORAGE_EMULATOR_HOST` in the worker's environment.** The library does not read it, but the GCS SDK it builds for `gcp-gcs` does: with it set, tenant GCS traffic would go, unauthenticated, to that host. Check the worker's image, Helm values and any sidecar injection. Since v2.1.0, `gcp-gcs` refuses to build a client while it is set (an upstream error naming the variable), so a misconfigured worker fails its GCS calls instead of leaking them.
 
 | Variable | Read by | Value |
 |---|---|---|
@@ -93,7 +95,7 @@ The library reads no environment variables. The worker reads these and passes th
 | Valkey address, user, password, TLS | The worker's go-redis client | The ACL user above |
 | Document bucket name and region | The worker's `*s3.Client` | The platform bucket |
 | Internal service token | `connectors.Config.InternalToken` | Required; `connectors.New` fails without it. Sent as `x-internal-token` on every `rest-call`. |
-| Alias registry | `connectors.Config.Aliases` | `aliasconfig.Load(path)` (strict YAML: an unknown or misspelt key, or a second document, is an error; validated on load), or built in code. `connectors.New` runs `Validate()` on it either way and fails on an invalid alias (for example a `baseURL` with a query or fragment). |
+| Alias registry | `connectors.Config.Aliases` | `aliasconfig.Load(path)` (strict YAML: an unknown or misspelt key, or a second document with content, is an error — empty documents such as `---` or `--- ~` are ignored; validated on load), or built in code. `connectors.New` runs `Validate()` on it either way and fails on an invalid alias (for example a `baseURL` with a query or fragment, or a `pathTemplate` with a `#` — write `%23` —, a raw space or other character invalid in a URL outside a `{placeholder}`, an unterminated `{`, a bad `%` escape, or a `;` or unparsable query). |
 
 **Tenant credentials are not configuration.** Fields the registry marks `secret_ref` (`registry.Field.IsSecretRef()`) are resolved per task from OpenBao for the job's own tenant (§5).
 
@@ -105,7 +107,7 @@ Do this once per process, and **exit on any error**: each check guards against s
 
 1. **Pool.** `pgcommon.ConfigFromEnv()` (log its warnings), then `pgcommon.NewPool`.
 2. **Migrations.** `documentsql.ApplySchema(ctx, runner)` and `intentsql.ApplySchema(ctx, runner)` with `runner := &migrate.Runner{DSN: pgcommon.MigrationDSNFromEnv()}`. Safe to run from every replica at once: they serialise on the advisory lock and apply each version once. Run them in the worker's migration step or at startup, before step 5.
-3. **Durability checks.** `valkeystore.CheckDurability(ctx, valkey)` and `s3content.New(s3Client, bucket).Check(ctx, "docrefs/")`. Classify the `CheckDurability` error in this order: first `errors.As(err, &derr)` with `var derr *valkeystore.DurabilityError` — some node is not a durable store (or its `WAITAOF` probe failed): refuse to start, whatever else the error contains; then `errors.Is(err, valkeystore.ErrConfigUnavailable)` — returned only when *every* failure is a managed Valkey blocking `CONFIG` after its `WAITAOF` probe passed: verify the settings in the provider console, then decide whether to start; anything else (a node unreachable, the slot map not loadable) is a startup failure. Also call `valkeystore.Options.Validate()` on the options you pass to `valkeystore.New`: a store built from invalid options refuses every `Put` with `valkeystore.ErrInvalidOptions`.
+3. **Durability checks.** `valkeystore.CheckDurability(ctx, valkey)` and `s3content.New(s3Client, bucket).Check(ctx, "docrefs/")`. Classify the `CheckDurability` error in this order: first `errors.As(err, &derr)` with `var derr *valkeystore.DurabilityError` — some node is not a durable store (or its `WAITAOF` probe failed): refuse to start, whatever else the error contains; then `errors.Is(err, valkeystore.ErrConfigUnavailable)` — returned only when *every* failure is a managed Valkey refusing `CONFIG GET` itself (`NOPERM`, or `ERR unknown command` / `unknown subcommand`) after its `WAITAOF` probe passed: verify the settings in the provider console, then decide whether to start; anything else (a node unreachable, the slot map not loadable, `WRONGPASS` — a master or replica without the worker's ACL user —, `LOADING`, `BUSY`, maxclients) is a startup failure. Also call `valkeystore.Options.Validate()` on the options you pass to `valkeystore.New`: a store built from invalid options refuses every `Put` with `valkeystore.ErrInvalidOptions`.
 4. **Document refs.** `docref.NewService(valkeystore.New(valkey, valkeystore.Options{}), content, docref.WithKeyPrefix("docrefs/"))`.
    - `Options.WaitReplicas`: 0 (default) confirms each write in the primary's AOF only; a ref can be lost if the primary fails over. Set it to the number of replicas per primary (at most) to survive a failover, at the cost of writes failing while too few replicas are up.
 5. **Connectors.** `connectors.New(connectors.Config{…})` with **every** provider the registry advertises:
@@ -172,7 +174,7 @@ d := connectors.DecideRetry(task.Type, err, method)
 | `connectors.ErrValidation` | Bad input or configuration; permanent. |
 | `connectors.ErrMissingInternalAuth`, `connectors.ErrMissingTenant` | The worker did not set departments or the tenant; a worker bug. |
 | `connectors.ErrUpstream` | A provider or internal service failed; read the class with `connectors.ClassOf`. |
-| `connectors.ErrNotDelivered`, `connectors.ErrDeliveryUnknown`; `*sendemail.SendError` | `send-email` outcome; the error carries provider, HTTP status and outcome. |
+| `connectors.ErrNotDelivered`, `connectors.ErrDeliveryUnknown`; `*sendemail.SendError` | `send-email` outcome; the error carries provider, HTTP status and outcome. `IntentUnrecorded` set: a failure after the reservation whose outcome could not be stored on the intent (invalid input found at that point included) — class unknown, the intent stays `pending` until an operator resolves it. A send that would start more than 11 min 50 s after its reservation is refused (`not_delivered`, transient), so a pending intent never turns stale while its send can be in flight. |
 | `*sendintent.DuplicateRequestError` | A duplicate of a pending or unknown email; permanent. Its `Attempts` is what an explicit resend must name. |
 | `documents.ErrUploadInProgress` (`*documents.InProgressError`) | Another call holds the Drive document; transient. |
 
@@ -187,10 +189,9 @@ Classify only with `connectors.ClassOf`, `IsTransient`, `IsPermanent` or `Decide
 | Credential rotation | Call `ResetClients()` on the `storage` and `send-email` connectors (type-assert `interface{ ResetClients() }` on the map's values). Calls in flight keep their client until they finish. | After a tenant's provider credentials change |
 | Drive audit pruning | `documentsql.Store.PruneAttempts(ctx, cutoff, batch)`, repeated while it returns `batch` | Daily, with the retention your audit policy requires |
 | Send-intent pruning | `intentsql.Store.PruneIntents(ctx, olderThan, batch)`, repeated while it returns `batch`; deletes finished (non-`pending`) intents only | Daily, with `olderThan` longer than any redelivery or replay of a send-email step can arrive (days): a pruned `messageKey` is a new message and is sent again |
-| Send intents | Rows are kept for duplicate protection; there is no pruning API. Archive or delete by `created_at` only beyond the longest window in which a job can be redelivered or resent. | Per data-retention policy |
 | Document refs | Nothing to run: refs expire in Valkey after 24 h and objects by the bucket lifecycle rule | — |
 | Shutdown | Stop taking tasks, wait for running calls, then `pool.DrainAndClose(ctx)` and close the Valkey client | On SIGTERM |
-| Valkey failover | With `WaitReplicas` 0, a ref acknowledged just before a primary failover can be lost; the consuming step then fails permanently with DocumentReferenceNotFound. Re-run the affected workflows from the producing step. | Incident |
+| Valkey failover | On a cluster, the first call that hits the dead master fails (transient) and schedules a slot-map reload, so later calls reach the promoted replica at once. With `WaitReplicas` 0, a ref acknowledged just before a primary failover can be lost; the consuming step then fails permanently with DocumentReferenceNotFound. Re-run the affected workflows from the producing step. | Incident |
 
 ## 8. Verification checklist
 
@@ -200,8 +201,10 @@ Before go-live, and after every library upgrade (read the `CHANGELOG.md` section
 - [ ] Migrations ran over a direct connection; the three tables and both `*_migrations` tables exist.
 - [ ] Runtime pool goes through PgBouncer with `PG_BOUNCER_MODE=true`, `PG_STATEMENT_TIMEOUT` and `PG_LOCK_TIMEOUT` set.
 - [ ] Startup fails when Valkey has `appendonly no`, and when the S3 role lacks `s3:ListBucket` (try both in staging).
-- [ ] The worker's Valkey user is the runbook ACL line, not `default`.
+- [ ] The worker's Valkey user is the runbook ACL line, not `default`, on every master and replica (`CheckDurability` fails with `WRONGPASS` otherwise).
 - [ ] Every registry provider is registered; no mock clients.
+- [ ] `STORAGE_EMULATOR_HOST` is not set in the worker's environment.
+- [ ] Drive folders are configured by ID (an alias such as `root` works but costs an extra list call per recorded-file call).
 - [ ] `SendIntents` and `DocRefs` are set.
 - [ ] Every task sets `WithTenant`; `rest-call` tasks also set `WithActor` (and `WithLaneDepartment` when the stage has a lane).
 - [ ] Per-call timeout below 15 minutes.

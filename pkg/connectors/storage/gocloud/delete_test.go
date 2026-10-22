@@ -17,7 +17,6 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -217,7 +216,6 @@ func TestS3Delete_AgainstStubEndpoint(t *testing.T) {
 	orig := newS3Client
 	t.Cleanup(func() { newS3Client = orig })
 	newS3Client = func(cfg aws.Config) *s3.Client {
-		cfg.RetryMaxAttempts = 1
 		return s3.NewFromConfig(cfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(srv.URL)
 			o.UsePathStyle = true
@@ -274,10 +272,8 @@ func TestAzureDelete_AgainstStubEndpoint(t *testing.T) {
 	t.Cleanup(srv.Close)
 	orig := newAzureContainerClient
 	t.Cleanup(func() { newAzureContainerClient = orig })
-	newAzureContainerClient = func(_ string, cred *container.SharedKeyCredential, _ *container.ClientOptions) (*container.Client, error) {
-		return orig(srv.URL+"/acct01/docs", cred, &container.ClientOptions{
-			ClientOptions: azcore.ClientOptions{Retry: policy.RetryOptions{MaxRetries: -1}},
-		})
+	newAzureContainerClient = func(_ string, cred *container.SharedKeyCredential, opts *container.ClientOptions) (*container.Client, error) {
+		return orig(srv.URL+"/acct01/docs", cred, opts) // the production options: no retries
 	}
 	client, err := openAzureBucket(context.Background(), "docs", map[string]any{"azureAccountName": "acct01", "azureAccountKey": azureKey})
 	require.NoError(t, err)
@@ -338,18 +334,26 @@ func (rt *gcsStubTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return &http.Response{StatusCode: status, Header: header, Request: req, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
+// useGCSTransport sends this test's GCS traffic to rt: the storage requests
+// (the adapter's own transport) and the token requests (tokenContext's
+// client, on http.DefaultTransport).
+func useGCSTransport(t *testing.T, rt http.RoundTripper) {
+	t.Helper()
+	origDefault, origGCS := http.DefaultTransport, newGCSTransport
+	http.DefaultTransport = rt
+	newGCSTransport = func() http.RoundTripper { return rt }
+	t.Cleanup(func() { http.DefaultTransport, newGCSTransport = origDefault, origGCS })
+}
+
 func gcsErrorBody(code int, message string) string {
 	return fmt.Sprintf(`{"error":{"code":%d,"message":%q,"errors":[{"reason":"x","message":%q}]}}`, code, message, message)
 }
 
-// Not parallel: it swaps http.DefaultTransport, which the GCS transport and
-// the token client both use.
+// Not parallel: it swaps the GCS transport and http.DefaultTransport.
 func TestGCSDelete_AgainstStubAPI(t *testing.T) {
 	t.Setenv("STORAGE_EMULATOR_HOST", "")
 	rt := &gcsStubTransport{}
-	orig := http.DefaultTransport
-	http.DefaultTransport = rt
-	t.Cleanup(func() { http.DefaultTransport = orig })
+	useGCSTransport(t, rt)
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)

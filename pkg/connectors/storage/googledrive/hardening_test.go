@@ -42,7 +42,10 @@ func TestDrive_WriteIsCutOffBeforeTheLeaseExpires(t *testing.T) {
 		ctx, api := tenantCtx(), newFakeDriveFilesAPI()
 		api.createGate = make(chan struct{}) // never opened: Drive hangs
 		c := newTestClient(api, store)
-		c.lease = 400 * time.Millisecond
+		// A lease under leaseMargin gets half of it as its write budget:
+		// the write is cut off at ~1s, a full second before the lease
+		// expires, so a slow (-race, PostgreSQL) run still has room.
+		c.lease = 2 * time.Second
 
 		start := time.Now()
 		err := c.Upload(ctx, folder, "slow.pdf", []byte("x"), "")
@@ -138,12 +141,14 @@ func TestDrive_WriteBudgetIsMeasuredFromTheClaim(t *testing.T) {
 	t.Parallel()
 	ctx, api := tenantCtx(), newFakeDriveFilesAPI()
 	api.createGate = make(chan struct{}) // Drive hangs
-	c := newTestClient(api, slowAdvance{documents.NewMemoryStore(), 150 * time.Millisecond})
-	c.lease = 400 * time.Millisecond // budget 200ms, of which Advance takes 150ms
+	c := newTestClient(api, slowAdvance{documents.NewMemoryStore(), 1500 * time.Millisecond})
+	c.lease = 4 * time.Second // budget 2s from the claim, of which Advance takes 1.5s
 
+	// Measured from the claim the write ends at ~2s; measured from the
+	// write it would end at ~3.5s. The 3s bound leaves a second either side.
 	start := time.Now()
 	require.Error(t, c.Upload(ctx, folder, "slow.pdf", []byte("x"), ""))
-	assert.Less(t, time.Since(start), 300*time.Millisecond, "the write's deadline counts the time already spent since the claim")
+	assert.Less(t, time.Since(start), 3*time.Second, "the write's deadline counts the time already spent since the claim")
 }
 
 type slowAdvance struct {
@@ -165,7 +170,7 @@ func TestDrive_DeleteIsBoundedByTheLease(t *testing.T) {
 	require.NoError(t, c.Upload(ctx, folder, "d.pdf", []byte("x"), ""))
 
 	api.deleteGate = make(chan struct{}) // Drive hangs on delete
-	c.lease = 400 * time.Millisecond
+	c.lease = 2 * time.Second            // cut off at ~1s, a second inside the lease
 	start := time.Now()
 	require.Error(t, c.Delete(ctx, folder, "d.pdf"))
 	assert.Less(t, time.Since(start), c.lease)

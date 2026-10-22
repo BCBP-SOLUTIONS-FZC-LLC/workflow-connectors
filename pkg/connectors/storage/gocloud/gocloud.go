@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 
+	gcs "cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,6 +22,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
@@ -34,8 +39,11 @@ const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
 
 type gocloudStorageClient struct {
 	bucket *blob.Bucket
-	// httpClient is this client's own transport, when it has one (aws-s3),
-	// so Close can drop its idle connections.
+	// provider selects the key rules (unaddressableKey); "" (in-memory test
+	// buckets only) applies the rules every provider shares.
+	provider string
+	// httpClient holds this client's own transport, so Close can drop its
+	// idle connections; nil for in-memory test buckets.
 	httpClient *http.Client
 	// objectMissing reports whether a failed delete means only that the
 	// object does not exist, in a bucket that does: gocloud maps a missing
@@ -85,6 +93,9 @@ func openS3Bucket(ctx context.Context, bucketName string, params map[string]any)
 		Region:      region,
 		Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
 		HTTPClient:  httpClient,
+		// The library never retries: one request per call, and the worker
+		// decides from the error's class (connectors.DecideRetry).
+		Retryer: func() aws.Retryer { return aws.NopRetryer{} },
 	}
 
 	client := newS3Client(cfg)
@@ -96,7 +107,7 @@ func openS3Bucket(ctx context.Context, bucketName string, params map[string]any)
 		_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucketName)})
 		return err
 	}
-	return &gocloudStorageClient{bucket: bucket, httpClient: httpClient, objectMissing: s3ObjectMissing(headBucket)}, nil
+	return &gocloudStorageClient{bucket: bucket, provider: "aws-s3", httpClient: httpClient, objectMissing: s3ObjectMissing(headBucket)}, nil
 }
 
 // s3ListBucketHint explains an S3 403 on a delete: S3 answers 403 rather
@@ -151,10 +162,19 @@ func s3ObjectMissing(headBucket func(context.Context) error) func(context.Contex
 
 // azureObjectMissing: only Azure's BlobNotFound means the blob is missing
 // from a container that exists; ContainerNotFound, an unknown account (DNS
-// "no such host") and any other 404 are failures.
+// "no such host") and any other 404 are failures. A blob with snapshots
+// (409 SnapshotsPresent) is never deleted together with them: the error says
+// so, and stays permanent.
 func azureObjectMissing(_ context.Context, err error) (bool, error) {
+	if bloberror.HasCode(err, bloberror.SnapshotsPresent) {
+		return false, fmt.Errorf("%s: %w", azureSnapshotsHint, err)
+	}
 	return bloberror.HasCode(err, bloberror.BlobNotFound), nil
 }
+
+// azureSnapshotsHint explains a 409 SnapshotsPresent on a delete.
+const azureSnapshotsHint = "the blob has snapshots (azure SnapshotsPresent): the connector never deletes snapshots, " +
+	"so delete the snapshots, or the blob with its snapshots, outside the connector, then retry"
 
 // gcsObjectMissing: the GCS client reports a 404 on an object call as
 // "object doesn't exist" whether the object or its bucket is missing. The
@@ -213,10 +233,16 @@ func openAzureBucket(ctx context.Context, containerName string, params map[strin
 	if err != nil {
 		return nil, fmt.Errorf("%w: azure-blob credential: %s", shared.ErrValidation, err)
 	}
+	httpClient := newTransportClient()
 	containerClient, err := newAzureContainerClient(
 		fmt.Sprintf("https://%s.blob.core.windows.net/%s", accountName, containerName),
 		cred,
-		nil,
+		&container.ClientOptions{ClientOptions: azcore.ClientOptions{
+			// One try per call (a negative MaxRetries): the library never
+			// retries.
+			Retry:     policy.RetryOptions{MaxRetries: -1},
+			Transport: httpClient,
+		}},
 	)
 	if err != nil {
 		return nil, upstream("azure-blob client", err)
@@ -226,7 +252,7 @@ func openAzureBucket(ctx context.Context, containerName string, params map[strin
 	if err != nil {
 		return nil, upstream(fmt.Sprintf("azure-blob open container %q", containerName), err)
 	}
-	return &gocloudStorageClient{bucket: bucket, objectMissing: azureObjectMissing}, nil
+	return &gocloudStorageClient{bucket: bucket, provider: "azure-blob", httpClient: httpClient, objectMissing: azureObjectMissing}, nil
 }
 
 // SDK constructors, replaceable in tests. With the arguments passed here they
@@ -236,7 +262,11 @@ var (
 	newAzureContainerClient = container.NewClientWithSharedKeyCredential
 	openAzureBlobBucket     = azureblob.OpenBucket
 	newGCSHTTPClient        = gcp.NewHTTPClient
+	newGCSClient            = gcs.NewClient
 	newS3Client             = func(cfg aws.Config) *s3.Client { return s3.NewFromConfig(cfg) }
+	// newGCSTransport is the transport under the GCS OAuth layer: this
+	// client's own, so Close drops only its idle connections.
+	newGCSTransport = func() http.RoundTripper { return storageTransport() }
 )
 
 var azureAccountPattern = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
@@ -254,6 +284,13 @@ func validAzureContainer(name string) bool {
 var azureContainerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
 func openGCSBucket(ctx context.Context, bucketName string, params map[string]any) (storage.ProviderClient, error) {
+	// The GCS SDK (and gocloud's gcsblob) honours STORAGE_EMULATOR_HOST from
+	// the process environment and would then send this tenant's requests,
+	// without credentials, to that host. The library reads no other
+	// environment; this one is refused rather than obeyed.
+	if host := os.Getenv(storageEmulatorHostEnv); host != "" {
+		return nil, upstream("gcp-gcs", fmt.Errorf("%w: %s is set on the worker (%q); unset it", errEmulatorHostSet, storageEmulatorHostEnv, host))
+	}
 	serviceAccountKey := shared.StringField(params, "gcpServiceAccountKey")
 	if serviceAccountKey == "" {
 		return nil, fmt.Errorf("%w: gcpServiceAccountKey is required for gcp-gcs", shared.ErrValidation)
@@ -266,22 +303,42 @@ func openGCSBucket(ctx context.Context, bucketName string, params map[string]any
 	if err != nil {
 		return nil, fmt.Errorf("%w: gcp-gcs credentials: %w", shared.ErrValidation, err)
 	}
-	httpClient, err := newGCSHTTPClient(gcp.DefaultTransport(), gcp.CredentialsTokenSource(creds))
+	transport := newGCSTransport()
+	httpClient, err := newGCSHTTPClient(transport, gcp.CredentialsTokenSource(creds))
 	if err != nil {
 		return nil, upstream("gcp-gcs http client", err)
 	}
 	// Never follow a redirect: the OAuth transport would re-send the request
 	// and its bearer token to whichever host it names.
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	httpClient.Timeout = storageHTTPTimeout
 
-	bucket, err := gcsblob.OpenBucket(ctx, httpClient, bucketName, nil)
+	client, err := newGCSClient(ctx, option.WithHTTPClient(&httpClient.Client))
 	if err != nil {
+		return nil, upstream("gcp-gcs client", err)
+	}
+	// One try per call: the library never retries.
+	client.SetRetry(gcs.WithPolicy(gcs.RetryNever))
+
+	bucket, err := gcsblob.OpenBucket(ctx, nil, bucketName, &gcsblob.Options{Client: client})
+	if err != nil {
+		_ = client.Close()
 		return nil, upstream(fmt.Sprintf("gcp-gcs open bucket %q", bucketName), err)
 	}
-	return &gocloudStorageClient{bucket: bucket, objectMissing: gcsObjectMissing(gcsListBucket(bucket))}, nil
+	return &gocloudStorageClient{
+		bucket:   bucket,
+		provider: "gcp-gcs",
+		// The OAuth layer cannot drop idle connections; a client on the
+		// transport under it can.
+		httpClient:    &http.Client{Transport: transport},
+		objectMissing: gcsObjectMissing(gcsListBucket(bucket)),
+	}, nil
 }
 
 func (c *gocloudStorageClient) Fetch(ctx context.Context, _, key string, maxBytes int64) ([]byte, string, error) {
+	if err := c.checkKey(key); err != nil {
+		return nil, "", err
+	}
 	r, err := c.bucket.NewReader(ctx, key, nil)
 	if err != nil {
 		return nil, "", upstream(fmt.Sprintf("gocloud fetch %q", key), err)
@@ -300,6 +357,9 @@ func (c *gocloudStorageClient) Fetch(ctx context.Context, _, key string, maxByte
 }
 
 func (c *gocloudStorageClient) Upload(ctx context.Context, _, key string, content []byte, contentType string) error {
+	if err := c.checkKey(key); err != nil {
+		return err
+	}
 	w, err := c.bucket.NewWriter(ctx, key, &blob.WriterOptions{ContentType: contentType})
 	if err != nil {
 		return upstream(fmt.Sprintf("gocloud upload %q", key), err)
@@ -320,6 +380,9 @@ func (c *gocloudStorageClient) Upload(ctx context.Context, _, key string, conten
 // bucket or container, a wrong region, a forbidden request or an unknown
 // account is an error (permanent), never success.
 func (c *gocloudStorageClient) Delete(ctx context.Context, _, key string) error {
+	if err := c.checkKey(key); err != nil {
+		return err
+	}
 	err := c.bucket.Delete(ctx, key)
 	if err == nil {
 		return nil
@@ -413,8 +476,83 @@ func (c *gocloudStorageClient) Close() error {
 	return err
 }
 
+// storageHTTPTimeout bounds a whole storage request, body included. It is
+// longer than shared.ProviderHTTPTimeout because a request carries up to
+// shared.MaxObjectBytes (50 MiB): 10 minutes still lets that through at about
+// 0.7 Mbit/s. A server that does not start answering is cut off sooner, by
+// the transport's ResponseHeaderTimeout (shared.ProviderHTTPTimeout).
+const storageHTTPTimeout = 10 * time.Minute
+
+const storageEmulatorHostEnv = "STORAGE_EMULATOR_HOST"
+
+// errEmulatorHostSet: the worker's environment would redirect GCS traffic.
+var errEmulatorHostSet = errors.New("gcp-gcs refuses to run with an emulator host configured")
+
+// storageTransport is a storage client's own transport: Go's defaults
+// (shared.BaseTransport), with a bound on the wait for response headers.
+func storageTransport() *http.Transport {
+	t := shared.BaseTransport()
+	t.ResponseHeaderTimeout = shared.ProviderHTTPTimeout
+	return t
+}
+
 // newTransportClient gives a client its own connection pool, so closing it
-// never affects another tenant's client.
+// never affects another tenant's client. Each request is bounded by
+// storageHTTPTimeout (a call's earlier deadline still wins), and a redirect
+// is returned, never followed: it would re-send the signed request to
+// whichever host the response names.
 func newTransportClient() *http.Client {
-	return &http.Client{Transport: shared.BaseTransport()}
+	return &http.Client{
+		Transport:     storageTransport(),
+		Timeout:       storageHTTPTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+// checkKey refuses, before any request, a key the provider's gocloud driver
+// cannot address (unaddressableKey).
+func (c *gocloudStorageClient) checkKey(key string) error {
+	if problem := unaddressableKey(c.provider, key); problem != "" {
+		return fmt.Errorf("%w: key %q %s, which the gocloud %s driver cannot address "+
+			"(it would rewrite the name to a hex escape and read, write or delete a different object)",
+			shared.ErrValidation, key, problem, providerLabel(c.provider))
+	}
+	return nil
+}
+
+func providerLabel(provider string) string {
+	if provider == "" {
+		return "storage"
+	}
+	return provider
+}
+
+// azureEscapedChars are the printable characters gocloud's azureblob driver
+// hex-escapes in a blob name.
+const azureEscapedChars = "\"#%?\\"
+
+// unaddressableKey says why gocloud's driver for provider would not use key
+// as the object name, or "" when it would. The drivers (gocloud.dev v0.46)
+// rewrite such characters to "__0xNN__": a blob named "Invoice #123.pdf" on
+// Azure would be read as "Invoice __0x23__123.pdf" (never found) and its
+// delete would succeed on a name that does not exist. Every driver escapes
+// control characters and the "/" of "../"; azureblob also escapes
+// " # % ? \ and DEL, and a trailing "/" (refused here for any name, since
+// Azure cannot address it consistently).
+func unaddressableKey(provider, key string) string {
+	if strings.Contains(key, "../") {
+		return `contains "../"`
+	}
+	for _, r := range key {
+		switch {
+		case r < 0x20:
+			return fmt.Sprintf("contains the control character %q", r)
+		case provider == "azure-blob" && (r == 0x7f || strings.ContainsRune(azureEscapedChars, r)):
+			return fmt.Sprintf("contains %q", r)
+		}
+	}
+	if provider == "azure-blob" && strings.HasSuffix(key, "/") {
+		return `ends with "/"`
+	}
+	return ""
 }

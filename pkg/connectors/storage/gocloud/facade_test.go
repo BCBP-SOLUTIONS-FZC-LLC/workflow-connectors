@@ -30,7 +30,6 @@ func TestREG15_StorageDeleteOnMissingBucket_IsAnError(t *testing.T) {
 	orig := newS3Client
 	t.Cleanup(func() { newS3Client = orig })
 	newS3Client = func(cfg aws.Config) *s3.Client {
-		cfg.RetryMaxAttempts = 1
 		return s3.NewFromConfig(cfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(srv.URL)
 			o.UsePathStyle = true

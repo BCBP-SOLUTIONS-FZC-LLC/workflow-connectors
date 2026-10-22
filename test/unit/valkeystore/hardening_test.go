@@ -184,7 +184,11 @@ func serveStateful(conn net.Conn, reply func(args []string) string) {
 			args = append(args, string(buf[:size]))
 		}
 		args[0] = strings.ToUpper(args[0])
-		if _, err := conn.Write([]byte(reply(args))); err != nil {
+		answer := reply(args)
+		if answer == "" { // drop the connection: a node failing mid-command
+			return
+		}
+		if _, err := conn.Write([]byte(answer)); err != nil {
 			return
 		}
 	}
@@ -207,8 +211,16 @@ func newMigratingPair(t *testing.T, hash string) *migratingPair {
 }
 
 // newMigratingPairWith is newMigratingPair whose redirects name the target
-// as spell(addr), and whose nodes answer ASKING with askingReply.
+// as spell(addr), and whose nodes answer ASKING with askingReply (an error
+// reply refuses it; "" drops the connection instead).
 func newMigratingPairWith(t *testing.T, hash string, spell func(addr string) string, askingReply string) *migratingPair {
+	t.Helper()
+	return newMigratingPairOpts(t, hash, spell, askingReply, false)
+}
+
+// newMigratingPairOpts is newMigratingPairWith; with serveAnyway the nodes
+// serve the command after ASKING even when they answered it with an error.
+func newMigratingPairOpts(t *testing.T, hash string, spell func(addr string) string, askingReply string, serveAnyway bool) *migratingPair {
 	t.Helper()
 	m := &migratingPair{}
 	var addrs [2]atomic.Value
@@ -220,7 +232,7 @@ func newMigratingPairWith(t *testing.T, hash string, spell func(addr string) str
 				asking = false
 				switch args[0] {
 				case "ASKING":
-					asking = !strings.HasPrefix(askingReply, "-")
+					asking = serveAnyway || !strings.HasPrefix(askingReply, "-")
 					return askingReply
 				case "WAITAOF":
 					if !wrote {

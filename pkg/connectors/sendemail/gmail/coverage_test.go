@@ -2,9 +2,10 @@ package gmail
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -81,22 +82,36 @@ func gmailAgainst(t *testing.T, httpClient *http.Client, srv *httptest.Server) *
 	return &gmailClient{api: &realGmailAPI{messages: svc.Users.Messages}}
 }
 
+// The message is uploaded as is, as message/rfc822, to the media-upload
+// endpoint in a single multipart request (no resumable session).
 func TestRealGmailAPI_Send(t *testing.T) {
 	t.Parallel()
 
-	var gotRaw string
+	var gotMedia, gotPath, gotUploadType string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var m struct {
-			Raw string `json:"raw"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&m)
-		gotRaw = m.Raw
-		if strings.Contains(r.URL.Path, "/users/me/messages/send") && m.Raw != "" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"gmail-42"}`))
+		gotPath, gotUploadType = r.URL.Path, r.URL.Query().Get("uploadType")
+		_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		w.WriteHeader(http.StatusBadRequest)
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		for {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			body, _ := io.ReadAll(part)
+			if part.Header.Get("Content-Type") == "message/rfc822" {
+				gotMedia = string(body)
+			}
+		}
+		if gotMedia == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gmail-42"}`))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -105,9 +120,10 @@ func TestRealGmailAPI_Send(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "gmail-42", id)
-	decoded, err := base64.URLEncoding.DecodeString(gotRaw)
-	require.NoError(t, err)
-	assert.Contains(t, string(decoded), "hello")
+	assert.Equal(t, "/upload/gmail/v1/users/me/messages/send", gotPath)
+	assert.Equal(t, "multipart", gotUploadType)
+	assert.Contains(t, gotMedia, "Subject: hi\r\n")
+	assert.Contains(t, gotMedia, "hello")
 }
 
 func TestRealGmailAPI_Send_StatusErrors(t *testing.T) {
