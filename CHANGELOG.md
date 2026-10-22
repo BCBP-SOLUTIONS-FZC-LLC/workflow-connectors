@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-22
+
+Caller identity on internal calls, per IAM's header contract for calls to alias targets. New exports only (`make api-compat API_NEW_VERSION=v2.2.0` reports no incompatible change), so this is a MINOR. **Upgrade:** a worker calling `rest-call` or `sql-query` sets `WithTenant` and `WithActor` (and `WithLaneDepartment` when the stage has one); `WithDepartments` alone now fails with `ErrMissingInternalAuth`.
+
 ### Added
 
 - `connectors.WithActor` and `connectors.WithLaneDepartment` (and their readers), and `shared.CallerHeadersFromContext`: `rest-call` and `sql-query` send `x-tenant-id` (from `WithTenant`), `x-user-id` (the actor, the tenant's automation principal) and, when set, `x-workflow-department-id` (the lane department, context only), per IAM's header contract for calls to alias targets (LLD rev 1.21).

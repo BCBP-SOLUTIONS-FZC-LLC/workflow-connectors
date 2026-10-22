@@ -4,7 +4,7 @@ The shared connector library for the workflow engine — the **fixed catalogue o
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`
 **Module:** Go 1.26.10 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
-**Version:** **v2.1.0** is the current release (2026-10-13): production-readiness changes with new exports only, but some inputs that used to be accepted are now refused. See `CHANGELOG.md` `[2.1.0]` and [Upgrading from v2.0.0](#7-upgrading-from-v200); v2.0.0 (2026-10-10) precedes it
+**Version:** **v2.2.0** is the current release (2026-10-22): `rest-call` and `sql-query` send the caller identity (`x-tenant-id`, `x-user-id`, `x-workflow-department-id`) and no `x-departments`; new exports only. See `CHANGELOG.md` `[2.2.0]`. **v2.1.0** (2026-10-13): production-readiness changes with new exports only, but some inputs that used to be accepted are now refused. See `CHANGELOG.md` `[2.1.0]` and [Upgrading from v2.0.0](#7-upgrading-from-v200); v2.0.0 (2026-10-10) precedes it
 **Design:** one LLD, `docs/lld/workflow-connectors-library-lld.md` (**rev 1.20**; rev 1.18 is the one signed off, for v2.0.0). Part I (§1–§21) is the module design; Part II (§S1–§S11) is the *Automatic Connector Tasks & Connector Workers* system design (rev 8.14) across `workflow-models`, `definition_service`, `execution_service` and this module. Where they disagree, Part II is authoritative. "LLD §S…" and "Decision #N" in this README cite Part II; "module LLD §…" cites Part I.
 
 ---
