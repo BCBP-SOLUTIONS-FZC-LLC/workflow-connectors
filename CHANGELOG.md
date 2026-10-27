@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-27
+
+Each secret field names the providers it serves. New exports only (`make api-compat API_NEW_VERSION=v2.3.0` reports no incompatible change), so this is a MINOR. **Upgrade:** a worker resolves `Definition.SecretFields(provider)` instead of every `secret_ref` input of the type.
+
 ### Added
 
 - `Field.Providers` lists the `provider` values a field applies to, and `Definition.SecretFields(provider)` returns the secret-reference inputs of one provider, so a worker reads only the credentials that provider uses (LLD rev 1.23).
