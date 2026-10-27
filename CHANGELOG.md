@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Field.Providers` lists the `provider` values a field applies to, and `Definition.SecretFields(provider)` returns the secret-reference inputs of one provider, so a worker reads only the credentials that provider uses (LLD rev 1.23).
+
 ## [2.2.0] - 2026-10-22
 
 Caller identity on internal calls, per IAM's header contract for calls to alias targets. New exports only (`make api-compat API_NEW_VERSION=v2.2.0` reports no incompatible change), so this is a MINOR. **Upgrade:** a worker calling `rest-call` or `sql-query` sets `WithTenant` and `WithActor` (and `WithLaneDepartment` when the stage has one); `WithDepartments` alone now fails with `ErrMissingInternalAuth`.

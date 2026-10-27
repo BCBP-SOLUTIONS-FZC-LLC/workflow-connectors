@@ -68,6 +68,7 @@ type Field struct {
 	Required    bool
 	EnumValues  []string
 	Condition   string
+	Providers   []string
 	Description string
 }
 
@@ -82,6 +83,16 @@ type Definition struct {
 	Inputs      []Field
 	Outputs     []Field
 	Retry       RetryPolicy
+}
+
+func (d Definition) SecretFields(provider string) []Field {
+	fields := []Field{}
+	for _, f := range d.Inputs {
+		if f.IsSecretRef() && (len(f.Providers) == 0 || slices.Contains(f.Providers, provider)) {
+			fields = append(fields, f)
+		}
+	}
+	return cloneFields(fields)
 }
 
 // All returns the definitions of the connector types a workflow may be
@@ -102,8 +113,8 @@ func All() map[string]Definition {
 // chat-notify (ChatNotifyDefinition), which connectors.New still builds.
 // Runtime code deciding about a connector's result (retry policy) uses
 // Lookup; authoring uses All. Lookup is called on every failed task, so the
-// definitions are built once; each call returns a copy (its Inputs, Outputs
-// and EnumValues slices included) that the caller may modify freely.
+// definitions are built once; each call returns a copy (its Inputs, Outputs,
+// EnumValues and Providers slices included) that the caller may modify freely.
 func Lookup(connectorType string) (Definition, bool) {
 	def, ok := lookupDefs[connectorType]
 	if !ok {
@@ -131,6 +142,7 @@ func cloneFields(fields []Field) []Field {
 	out := slices.Clone(fields)
 	for i := range out {
 		out[i].EnumValues = slices.Clone(out[i].EnumValues)
+		out[i].Providers = slices.Clone(out[i].Providers)
 	}
 	return out
 }

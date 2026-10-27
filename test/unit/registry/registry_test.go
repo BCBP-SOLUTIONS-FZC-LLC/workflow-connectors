@@ -74,6 +74,9 @@ func TestLookup_ReturnsIndependentCopies(t *testing.T) {
 			for j := range first.Inputs[i].EnumValues {
 				first.Inputs[i].EnumValues[j] = "changed"
 			}
+			for j := range first.Inputs[i].Providers {
+				first.Inputs[i].Providers[j] = "changed"
+			}
 		}
 
 		again, ok := registry.Lookup(typ)
@@ -243,4 +246,117 @@ func TestDefinitions_CoverFieldsTheConnectorsUse(t *testing.T) {
 	email := registry.All()[registry.TypeSendEmail]
 	warning := fieldByName(t, email.Outputs, "sendIntentWarning")
 	assert.Equal(t, registry.FieldKindString, warning.Kind)
+}
+
+func secretFieldNames(fields []registry.Field) []string {
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+func TestDefinition_SecretFieldsPerProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		typ         string
+		provider    string
+		wantSecrets []string
+	}{
+		{
+			name:        "storage aws-s3",
+			typ:         registry.TypeStorage,
+			provider:    "aws-s3",
+			wantSecrets: []string{"accessKey", "secretKey"},
+		},
+		{
+			name:        "storage azure-blob",
+			typ:         registry.TypeStorage,
+			provider:    "azure-blob",
+			wantSecrets: []string{"azureAccountName", "azureAccountKey"},
+		},
+		{
+			name:        "storage gcp-gcs",
+			typ:         registry.TypeStorage,
+			provider:    "gcp-gcs",
+			wantSecrets: []string{"gcpServiceAccountKey"},
+		},
+		{
+			name:        "storage google-drive",
+			typ:         registry.TypeStorage,
+			provider:    "google-drive",
+			wantSecrets: []string{"driveServiceAccountKey"},
+		},
+		{
+			name:        "send-email sendgrid",
+			typ:         registry.TypeSendEmail,
+			provider:    "sendgrid",
+			wantSecrets: []string{"apiKey"},
+		},
+		{
+			name:        "send-email aws-ses",
+			typ:         registry.TypeSendEmail,
+			provider:    "aws-ses",
+			wantSecrets: []string{"accessKey", "secretKey"},
+		},
+		{
+			name:        "send-email microsoft-365",
+			typ:         registry.TypeSendEmail,
+			provider:    "microsoft-365",
+			wantSecrets: []string{"clientSecret"},
+		},
+		{
+			name:        "send-email google-workspace",
+			typ:         registry.TypeSendEmail,
+			provider:    "google-workspace",
+			wantSecrets: []string{"serviceAccountKey"},
+		},
+		{
+			name:        "storage unknown provider",
+			typ:         registry.TypeStorage,
+			provider:    "nope",
+			wantSecrets: []string{},
+		},
+		{
+			name:        "rest-call has none",
+			typ:         registry.TypeRestCall,
+			provider:    "",
+			wantSecrets: []string{},
+		},
+		{
+			name:        "chat-notify applies to every provider",
+			typ:         registry.TypeChatNotify,
+			provider:    "",
+			wantSecrets: []string{"authToken"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			def, ok := registry.Lookup(tt.typ)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantSecrets, secretFieldNames(def.SecretFields(tt.provider)))
+		})
+	}
+}
+
+func TestDefinitions_ProvidersNameRealProviders(t *testing.T) {
+	t.Parallel()
+
+	for typ, def := range registry.All() {
+		var providers []string
+		if hasField(def.Inputs, "provider") {
+			providers = fieldByName(t, def.Inputs, "provider").EnumValues
+		}
+		for _, f := range def.Inputs {
+			for _, p := range f.Providers {
+				assert.Contains(t, providers, p, "%s.%s", typ, f.Name)
+			}
+			if f.IsSecretRef() && len(providers) > 0 {
+				assert.NotEmpty(t, f.Providers, "%s.%s names its providers", typ, f.Name)
+			}
+		}
+	}
 }
