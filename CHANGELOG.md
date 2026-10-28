@@ -15,6 +15,10 @@ Each secret field names the providers it serves. New exports only (`make api-com
 
 - `Field.Providers` lists the `provider` values a field applies to, and `Definition.SecretFields(provider)` returns the secret-reference inputs of one provider, so a worker reads only the credentials that provider uses (LLD rev 1.23).
 
+### Security
+
+- `go-jose/v4` is `v4.1.6` (a denial of service when parsing a JWK with RSA keys) and `golang.org/x/net` is `v0.62.0` (two HTML parsing advisories), both indirect, so the Trivy scan passes.
+
 ## [2.2.0] - 2026-10-22
 
 Caller identity on internal calls, per IAM's header contract for calls to alias targets. New exports only (`make api-compat API_NEW_VERSION=v2.2.0` reports no incompatible change), so this is a MINOR. **Upgrade:** a worker calling `rest-call` or `sql-query` sets `WithTenant` and `WithActor` (and `WithLaneDepartment` when the stage has one); `WithDepartments` alone now fails with `ErrMissingInternalAuth`.
