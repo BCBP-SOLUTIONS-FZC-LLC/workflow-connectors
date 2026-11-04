@@ -200,9 +200,25 @@ jobs:
 
       # Critical/High findings fail the release — a known-vulnerable module
       # must not be tagged as a release that consuming services will pin.
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: 0.70.0
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/trivy-bin"
+          mkdir -p "$dir"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSL -o "$dir/$archive" "$base/$archive"
+          curl -fsSL -o "$dir/checksums.txt" "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          (cd "$dir" && grep " ${archive}\$" checksums.txt | sha256sum -c -)
+          tar -xzf "$dir/$archive" -C "$dir" trivy
+          echo "$dir" >> "$GITHUB_PATH"
+
       - name: Scan dependencies for CVEs
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: .
           # tools/go.mod holds golangci-lint, a development tool: its
@@ -227,6 +243,7 @@ jobs:
       - name: Generate SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: .
           # tools/go.mod holds golangci-lint, a development tool: its

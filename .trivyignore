@@ -1,0 +1,4 @@
+# golang.org/x/crypto: the openpgp package is unmaintained, and the only fix is an unreleased commit (v0.58.0 is the latest release).
+# This module reaches x/crypto only through gocloud.dev/blob/azureblob (pkcs12) and imports no openpgp code.
+# Revisit when x/crypto releases a version with the fix; the entry expires on its own.
+GO-2026-5932 exp:2026-12-04
