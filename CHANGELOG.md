@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `.trivyignore` accepts GO-2026-5932 (the unmaintained `golang.org/x/crypto/openpgp` package, whose fix is not in a release) until 2026-12-04. The module reaches only `x/crypto/pkcs12` through the Azure blob driver and imports no openpgp code. Nothing else is ignored.
+
 ## [2.3.0] - 2026-10-27
 
 Each secret field names the providers it serves. New exports only (`make api-compat API_NEW_VERSION=v2.3.0` reports no incompatible change), so this is a MINOR. **Upgrade:** a worker resolves `Definition.SecretFields(provider)` instead of every `secret_ref` input of the type.
