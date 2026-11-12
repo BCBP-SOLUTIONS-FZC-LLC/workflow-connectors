@@ -5,9 +5,9 @@ All notable changes to `workflow-connectors` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.4.0] - 2026-11-12
 
-The internal token is optional. Proposed version **2.4.0**: no exported name changes (`make api-compat API_NEW_VERSION=v2.4.0` to confirm), so this is a MINOR. **Upgrade:** none required; a worker that passes `InternalToken` keeps sending `x-internal-token`, and a worker that leaves it empty now builds and sends no such header.
+The internal token is optional. Version **2.4.0**: no exported name changes (`make api-compat API_NEW_VERSION=v2.4.0` to confirm), so this is a MINOR. **Upgrade:** none required; a worker that passes `InternalToken` keeps sending `x-internal-token`, and a worker that leaves it empty now builds and sends no such header.
 
 ### Changed
 
