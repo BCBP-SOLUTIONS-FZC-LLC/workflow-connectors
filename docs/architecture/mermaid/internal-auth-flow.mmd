@@ -10,7 +10,7 @@ sequenceDiagram
     R ->>+ AC: ResolveEndpoint(alias)
     AC -->>- R: Endpoint{Method, BaseURL, PathTemplate, Timeout}<br/>or aliasconfig.ErrUnknownAlias
     Note over R: no tenant or actor in ctx, or a CR/LF in any identity value → ErrMissingInternalAuth (fails closed, nothing sent)<br/>{placeholders} filled with url.PathEscape'd pathParams (no "", ".", ".."),<br/>URL must keep BaseURL's scheme + host, no userinfo
-    R ->>+ S: METHOD BaseURL+path?query<br/>x-internal-token: Config.InternalToken<br/>x-tenant-id · x-user-id · x-workflow-department-id<br/>(context timeout = Endpoint.Timeout when set)
+    R ->>+ S: METHOD BaseURL+path?query<br/>x-internal-token: Config.InternalToken (only when set)<br/>x-tenant-id · x-user-id · x-workflow-department-id<br/>(context timeout = Endpoint.Timeout when set)
     S -->>- R: status · headers · body (JSON decoded, numbers as json.Number, when Content-Type has "json")
     Note over R,S: client never follows redirects — a 3xx is returned, not chased,<br/>so the headers never reach another host — HTTP/1.1 only,<br/>each call bounded by Endpoint.Timeout, else 30 s (shared.CallTimeout)
     alt status < 300

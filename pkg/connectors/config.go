@@ -12,8 +12,12 @@ import (
 )
 
 type Config struct {
-	Aliases       aliasconfig.Config
-	HTTPClient    *http.Client
+	Aliases    aliasconfig.Config
+	HTTPClient *http.Client
+
+	// InternalToken is optional. When set, rest-call and sql-query send it as
+	// x-internal-token on every call; when empty they send no such header and
+	// the callee authenticates the worker by mesh identity.
 	InternalToken string
 
 	StorageProviders   map[string]storage.ProviderConstructor

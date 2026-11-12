@@ -82,6 +82,55 @@ func TestRestCall_MissingCallerIdentity_FailsClosedBeforeAnyRequest(t *testing.T
 	assert.False(t, called)
 }
 
+func TestRestCall_NoInternalToken_SendsNoTokenHeaderButTheCallerIdentity(t *testing.T) {
+	t.Parallel()
+
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	aliases := aliasconfig.Config{RestCall: []aliasconfig.Endpoint{
+		{Alias: "get-app", Method: "GET", BaseURL: srv.URL, PathTemplate: "/apps"},
+	}}
+	conn := restcall.New(aliases, nil, "")
+
+	_, err := conn.Execute(callerCtx(), map[string]any{"endpointAlias": "get-app"})
+	require.NoError(t, err)
+
+	assert.Empty(t, got.Values("x-internal-token"), "no token configured: no header")
+	assert.Equal(t, "tenant-1", got.Get("x-tenant-id"))
+	assert.Equal(t, "principal-sub", got.Get("x-user-id"))
+}
+
+func TestRestCall_NoInternalToken_MissingTenantOrActor_FailsClosedBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	aliases := aliasconfig.Config{RestCall: []aliasconfig.Endpoint{
+		{Alias: "get-app", Method: "GET", BaseURL: srv.URL, PathTemplate: "/apps"},
+	}}
+	conn := restcall.New(aliases, nil, "")
+
+	for name, ctx := range map[string]context.Context{
+		"nothing":     context.Background(),
+		"tenant only": shared.WithTenant(context.Background(), "tenant-1"),
+		"actor only":  shared.WithActor(context.Background(), "principal-sub"),
+	} {
+		_, err := conn.Execute(ctx, map[string]any{"endpointAlias": "get-app"})
+		require.ErrorIs(t, err, shared.ErrMissingInternalAuth, name)
+	}
+	assert.False(t, called)
+}
+
 func TestRestCall_UnknownAlias_NoNetworkCall(t *testing.T) {
 	t.Parallel()
 

@@ -27,7 +27,8 @@ type Connector struct {
 
 // New builds the connector. httpClient is copied and never follows redirects
 // (shared.InternalHTTPClient); nil means a default client. Each call is
-// bounded by its alias's timeout, or shared.DefaultHTTPTimeout.
+// bounded by its alias's timeout, or shared.DefaultHTTPTimeout. internalToken
+// is optional: it is sent as x-internal-token only when non-empty.
 func New(aliases aliasconfig.Config, httpClient *http.Client, internalToken string) Connector {
 	return Connector{aliases: aliases, httpClient: shared.InternalHTTPClient(httpClient), internalToken: internalToken}
 }
@@ -86,7 +87,9 @@ func (s Connector) Execute(ctx context.Context, input map[string]any) (map[strin
 		return nil, fmt.Errorf("sql-query %q: %w", alias, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(shared.InternalTokenHeader, s.internalToken)
+	if s.internalToken != "" {
+		req.Header.Set(shared.InternalTokenHeader, s.internalToken)
+	}
 	caller.Apply(req.Header)
 
 	resp, err := s.httpClient.Do(req)

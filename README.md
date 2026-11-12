@@ -3,7 +3,7 @@
 The shared connector library for the workflow engine — the **fixed catalogue of automatic BPMN service tasks** (`connector:`-prefixed) and their implementations. It owns the catalogue metadata the authoring side compiles against (`pkg/registry`) and the `Execute` implementations the Execution Service's connector worker runs (`pkg/connectors`): `storage` and `send-email` with real provider adapters, `rest-call` to internal platform services, and `chat-notify`. It has no process of its own — it runs inside `execution_service`'s `cmd/connector-worker`, which owns delivery, retries, credentials and completion.
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`
-**Module:** Go 1.26.10 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
+**Module:** Go 1.26.11 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
 **Version:** **v2.2.0** is the current release (2026-10-22): `rest-call` and `sql-query` send the caller identity (`x-tenant-id`, `x-user-id`, `x-workflow-department-id`) and no `x-departments`; new exports only. See `CHANGELOG.md` `[2.2.0]`. **v2.1.0** (2026-10-13): production-readiness changes with new exports only, but some inputs that used to be accepted are now refused. See `CHANGELOG.md` `[2.1.0]` and [Upgrading from v2.0.0](#7-upgrading-from-v200); v2.0.0 (2026-10-10) precedes it
 **Design:** one LLD, `docs/lld/workflow-connectors-library-lld.md` (**rev 1.20**; rev 1.18 is the one signed off, for v2.0.0). Part I (§1–§21) is the module design; Part II (§S1–§S11) is the *Automatic Connector Tasks & Connector Workers* system design (rev 8.14) across `workflow-models`, `definition_service`, `execution_service` and this module. Where they disagree, Part II is authoritative. "LLD §S…" and "Decision #N" in this README cite Part II; "module LLD §…" cites Part I.
 
@@ -19,7 +19,7 @@ The shared connector library for the workflow engine — the **fixed catalogue o
 | Provider adapters — `storage/{gocloud,googledrive}`, `sendemail/{ses,sendgrid,msgraph,gmail}`; the only packages that import a cloud SDK | Writing, rotating and revoking credentials (`definition_service`) |
 | `aliasconfig` — the alias schema `rest-call`/`sql-query` resolve against, its loader and validation | The alias registry's storage, CRUD API and internal-host allowlist (`definition_service`) |
 | `docref` — document refs shared by `storage` and `send-email`: content in the platform's S3 document bucket (`docref/s3content`), reference metadata in Valkey (`docref/valkeystore`), verified on every resolution | BPMN compilation and the `connector:` task rule (`definition_service`); the DSL shape (`workflow-models`) |
-| The internal-call header contract (`x-internal-token`, `x-tenant-id`, `x-user-id`, `x-workflow-department-id`) | Logging, metrics, tracing — the worker's |
+| The internal-call header contract (optional `x-internal-token`, `x-tenant-id`, `x-user-id`, `x-workflow-department-id`) | Logging, metrics, tracing — the worker's |
 
 The worker is the composition root: it maps provider names to adapter constructors and passes them in `Config`. `pkg/connectors` never imports an adapter, so a consumer that imports it alone compiles no cloud SDK.
 
@@ -41,12 +41,12 @@ Keeping both in one module means the catalogue and the code that implements it c
 The public surface is Go, not HTTP. Source of truth: `pkg/connectors/connector.go`, `config.go` and each connector package; full contract in the module LLD §5.
 
 ```go
-func New(cfg Config) (map[string]Connector, error)   // fails on empty InternalToken; panics on duplicate Type
+func New(cfg Config) (map[string]Connector, error)   // fails on invalid Aliases; panics on duplicate Type
 
 type Config struct {
     Aliases            aliasconfig.Config
     HTTPClient         *http.Client                              // copied, never follows redirects, HTTP/1.1 only; nil → default transport with no proxy, each call bounded by its alias timeout (else 30 s)
-    InternalToken      string                                    // required
+    InternalToken      string                                    // optional; x-internal-token only when set
     StorageProviders   map[string]storage.ProviderConstructor
     SendEmailProviders map[string]sendemail.ProviderConstructor
     ChatNotifyClient   chatnotify.ProviderClient                 // nil → every chat-notify call fails (ErrValidation)
@@ -108,7 +108,7 @@ Every error wraps exactly one of these sentinels **and** has exactly one class: 
 | `rest-call` path parameters cannot alter the path | Each `{name}` value in the path is `url.PathEscape`d and must not be empty, `.` or `..`; one in the template's query string is `url.QueryEscape`d; a missing name is `ErrValidation` |
 | `rest-call`/`sql-query` never leave the alias's host | `pathTemplate`/`path` must start with `/` (`aliasconfig.Validate`), and every request URL must keep the `baseURL`'s scheme and host with no userinfo and no `#` (`shared.NewInternalRequest`) — `ErrValidation` otherwise |
 | `queryParams` cannot override the alias | A key the `pathTemplate`'s query string already sets, or an empty name, is `ErrValidation`; a `#` in a `pathTemplate` is refused (everything after it would be a fragment, never sent, so its fixed keys would vanish — write `%23`); a `;` in a `pathTemplate`'s query is refused by `aliasconfig.Validate` (Go's query parser would drop that pair and hide its key), and an alias query that does not parse is `ErrValidation` at call time |
-| `rest-call`/`sql-query` never send without caller identity | Departments required in the context; `InternalToken` required at `New` |
+| `rest-call`/`sql-query` never send without caller identity | Tenant and actor required in the context; `x-internal-token` sent only when `InternalToken` is set |
 | `rest-call` parameters are scalars | Every `pathParams` / `queryParams` value is a string, number or boolean (`shared.FormatScalarParam`); a list, map or nil is `ErrValidation`. The caller's `queryParams` are appended after the alias's fixed query, which is kept exactly as written |
 | `sql-query` parameter count matches the alias | `params` must be a list (anything else is `ErrValidation`), and `len(params) == paramCount` exactly — `paramCount: 0` means no parameters |
 | Email addresses are single, bare addresses | `net/mail.ParseAddress` must yield exactly the input, with no display name — no comma-separated extra recipients |
@@ -269,7 +269,7 @@ The pre-flight checklist is in the guide ([Verification checklist](docs/integrat
 
 ### 4. Internal services called by `rest-call` / `sql-query`
 
-Every call carries `x-internal-token` (the platform's service-to-service token), `x-tenant-id` (the job's tenant) and `x-user-id` (the tenant's automation principal), and `x-workflow-department-id` (the stage's lane department) when the stage has one. No department grant is sent: the automation principal holds no department role, so `x-departments` is never set. Admit the worker by its mesh identity, authenticate the token, and apply your own rule for automation callers; the lane department is context and grants nothing. `sql-query` posts `{"queryId", "params"}` and expects `{"resultSet": [...]}`. Both connectors speak HTTP/1.1 only and decode JSON numbers as `json.Number`, so integer IDs beyond 2^53 keep every digit. A `rest-call` error response (status `>= 300`) is classified by its status alone; its body is capped at 10 MiB (cut to the first 10 MiB, or what arrived if the read failed, returned as a string with `bodyTruncated: true`).
+Every call carries `x-tenant-id` (the job's tenant) and `x-user-id` (the tenant's automation principal), and `x-workflow-department-id` (the stage's lane department) when the stage has one. No department grant is sent: the automation principal holds no department role, so `x-departments` is never set. `x-internal-token` is sent only when `Config.InternalToken` is set; without one the callee authenticates the worker by mesh identity. Admit the worker by its mesh identity, authenticate the token when one is configured, and apply your own rule for automation callers; the lane department is context and grants nothing. `sql-query` posts `{"queryId", "params"}` and expects `{"resultSet": [...]}`. Both connectors speak HTTP/1.1 only and decode JSON numbers as `json.Number`, so integer IDs beyond 2^53 keep every digit. A `rest-call` error response (status `>= 300`) is classified by its status alone; its body is capped at 10 MiB (cut to the first 10 MiB, or what arrived if the read failed, returned as a string with `bodyTruncated: true`).
 
 ### 5. Handling errors
 
@@ -301,7 +301,7 @@ v2.1.0 changes no signature, but refuses some inputs v2.0.0 accepted and needs i
 
 ### Prerequisites
 
-- Go 1.26.10+
+- Go 1.26.11+
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (`GONOSUMDB` too) and an SSH key registered with the BCBP org
 - `.env` (created from `.env-example` by `make setup`, git-ignored): the compose host ports (`WC_*`), the `TEST_*` variables the integration tests read, and platform-pgcommon's `PG_*` / `MIGRATION_DATABASE_URL` pointed at the compose stack. The library itself reads no configuration from the environment (the GCS SDK under it honours `STORAGE_EMULATOR_HOST`: never set it for a worker; `gcp-gcs` refuses to build a client while it is set). `TEST_VALKEY_CLUSTER_ADDRS` lists seed nodes of the compose Valkey Cluster. Under `make`, a value in `.env` **overrides** the same variable exported in your shell: override one run with `make <target> VAR=value` or `make -e`. Docker for the integration infrastructure in `docker-compose.yml` (PostgreSQL, PgBouncer, Valkey, floci S3, and the `valkey-cluster` profile) — `make test-unit` needs none
 
@@ -410,7 +410,7 @@ The library reads **no environment variables**. Everything is passed to `connect
 
 | `Config` field | Required | Default |
 |---|---|---|
-| `InternalToken` | yes | — (`New` fails) |
+| `InternalToken` | no | empty — no `x-internal-token` header is sent; the callee authenticates the worker by mesh identity |
 | `Aliases` | no | empty — every alias unknown |
 | `HTTPClient` | no | a client with no client-wide timeout: each call is bounded by its alias's `timeout`, else 30 s (`shared.CallTimeout`). Any client is copied, set never to follow redirects, and limited to HTTP/1.1: an `*http.Transport` (or none) is cloned with HTTP/2 off; any other `RoundTripper` is used as-is and must not enable HTTP/2. A nil client or nil `Transport` gets a transport with **no proxy** (`HTTP_PROXY` / `HTTPS_PROXY` are ignored, so the internal headers never reach an egress proxy); a caller's `*http.Transport` keeps its own `Proxy`. Transports are built from `shared.BaseTransport()`, so wrapping `http.DefaultTransport` (otelhttp, httpmock) is safe |
 | `StorageProviders` | no | empty — every `storage` call `ErrValidation` |
@@ -430,12 +430,12 @@ Per-call credentials arrive in `Execute`'s input under the registry's field name
 | **Credentials never travel in a plan** | For every `secret_ref` field the worker reads the tenant's stored credential from OpenBao just before `Execute` and passes the value. A connector never sees an OpenBao path, and a diagram never names a credential (LLD §S6.2, rev 8.13) |
 | **Per-credential client isolation** | Provider clients are cached by a hash of every credential field (plus bucket or sender), so one tenant's client is never handed to another |
 | **Internal calls only** | `rest-call`/`sql-query` take aliases, never URLs; the alias `baseURL` allowlist is enforced at alias write in `definition_service` (LLD §S9) |
-| **Mandatory internal auth** | Every internal call carries `x-internal-token`, `x-tenant-id` and `x-user-id`; a missing tenant or actor fails closed before any request, and no department grant is ever sent |
+| **Mandatory caller identity** | Every internal call carries `x-tenant-id` and `x-user-id` (and `x-internal-token` when a token is configured); a missing tenant or actor fails closed before any request, and no department grant is ever sent |
 | **Header-injection safety** | Gmail's raw MIME strips CR/LF from every header value and Q-encodes names and subject (a long subject is folded within RFC 5322's 998-byte line limit); Graph path-escapes the sender |
 | **`gcp-gcs` service-account keys only** | Workload-identity configurations that would read the worker's own filesystem or metadata identity are refused |
 | **Document refs** | Random UUIDs. The reference's tenant and bucket are checked, and its object key must be exactly `<prefix><tenant_id>/<uuid>` for the ref's own ID, **before** any S3 request — a ref from another tenant never resolves, on any replica. Content is read with the worker's own S3 credentials (none are stored in refs) and its size and SHA-256 are verified on every resolution, so an overwritten object is refused, never served; 24 h TTL |
 | **No redirects on provider and token calls** | S3, Azure and GCS clients each have their own transport, a 10-minute request timeout (2 minutes to the first response byte) and never follow a redirect; Gmail and Graph OAuth token requests use their own HTTP/1.1 transport, 30 s, no redirects, so a signed assertion or client secret is never carried to another host |
-| **No redirects or proxy on internal calls** | `rest-call`/`sql-query` never follow a redirect, and the default transport ignores `HTTP_PROXY` / `HTTPS_PROXY`, so `x-internal-token` and the caller identity can never be re-sent to another host or through an egress proxy |
+| **No redirects or proxy on internal calls** | `rest-call`/`sql-query` never follow a redirect, and the default transport ignores `HTTP_PROXY` / `HTTPS_PROXY`, so `x-internal-token` (when configured) and the caller identity can never be re-sent to another host or through an egress proxy |
 | **Deleting a tampered ref** | A ref whose record fails its integrity checks is removed (tenant-guarded) together with its own canonical object `<prefix><tenant>/<uuid>`, never the object the record names (it may belong to another document) |
 | **One recipient per address field** | `senderEmail`/`receiverEmail` must each be a single bare address, so a value like `a@x.com, b@y.com` cannot add recipients |
 | **`senderEmail` is not bound to the credential** | The library sends as the `senderEmail` the workflow gives. A Graph app with the `Mail.Send` application permission, or a Google service account with domain-wide delegation, can send as any mailbox in the organisation: customers should restrict it at the provider (Exchange Online Application Access Policy / RBAC for Applications; delegation limited to `gmail.send` for the intended users). See [`docs/runbooks/email-delivery.md`](docs/runbooks/email-delivery.md) |

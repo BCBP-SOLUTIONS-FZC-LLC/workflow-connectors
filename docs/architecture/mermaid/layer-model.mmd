@@ -4,7 +4,7 @@ graph TD
     end
 
     subgraph facade["Facade  —  pkg/connectors"]
-        new["connector.go · config.go\nConnector interface { Type(); Execute(ctx, input) }\nNew(Config) → map[type]Connector (storage · send-email · chat-notify · rest-call)\nInternalToken required — New fails without it\nConfig.DocRefs (docref.Service: S3 content + Valkey metadata) shared by storage + send-email\nConfig.SendIntents (sendintent.Store) for send-email messageKey\nretry.go: DecideRetry · RetryDecision\nerrors.go · internalauth.go re-export shared's sentinels, error classes + tenant/departments context helpers"]
+        new["connector.go · config.go\nConnector interface { Type(); Execute(ctx, input) }\nNew(Config) → map[type]Connector (storage · send-email · chat-notify · rest-call)\nInternalToken optional — x-internal-token sent only when set\nConfig.DocRefs (docref.Service: S3 content + Valkey metadata) shared by storage + send-email\nConfig.SendIntents (sendintent.Store) for send-email messageKey\nretry.go: DecideRetry · RetryDecision\nerrors.go · internalauth.go re-export shared's sentinels, error classes + tenant/departments context helpers"]
     end
 
     subgraph adapters["Provider Adapters  —  pkg/connectors/{connector}/{provider}/  (the only place a cloud SDK is imported)"]
@@ -16,7 +16,7 @@ graph TD
         storage["storage/\nProviderClient port · ProviderConstructor\nfetch / upload / delete · per-credential client cache (256)\nMockStorageClient"]
         sendemail["sendemail/\nProviderClient port · EmailMessage · EmailAttachment\ntemplateless-provider rule · attachments via *docref.Service\nper-sender client cache (256) · MockSendEmailClient"]
         chatnotify["chatnotify/\nProviderClient port · nil client → every call ErrValidation (no real provider yet)"]
-        restcall["restcall/\nalias → internal endpoint · x-internal-token + caller identity"]
+        restcall["restcall/\nalias → internal endpoint · caller identity (+ x-internal-token when configured)"]
         sqlquery["sqlquery/  (not wired into New)\nalias → owning service's query endpoint, never SQL text"]
         docextract["documentextract/  (not wired into New)\nProviderClient port · nil client → ErrValidation"]
     end

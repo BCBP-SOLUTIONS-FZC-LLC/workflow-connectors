@@ -65,6 +65,51 @@ func TestSQLQuery_SendsTheCallerIdentityAndBindsParams(t *testing.T) {
 	assert.Len(t, resultSet, 1)
 }
 
+func TestSQLQuery_NoInternalToken_SendsNoTokenHeaderButTheCallerIdentity(t *testing.T) {
+	t.Parallel()
+
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resultSet":[]}`))
+	}))
+	defer srv.Close()
+
+	aliases := aliasconfig.Config{SQLQuery: []aliasconfig.Query{
+		{Alias: "q", BaseURL: srv.URL, Path: "/q", QueryID: "q"},
+	}}
+	ctx := shared.WithActor(shared.WithTenant(context.Background(), "tenant-1"), "principal-sub")
+	_, err := sqlquery.New(aliases, nil, "").Execute(ctx, map[string]any{"queryAlias": "q"})
+	require.NoError(t, err)
+
+	assert.Empty(t, got.Values("x-internal-token"), "no token configured: no header")
+	assert.Equal(t, "tenant-1", got.Get("x-tenant-id"))
+	assert.Equal(t, "principal-sub", got.Get("x-user-id"))
+}
+
+func TestSQLQuery_NoInternalToken_MissingTenantOrActor_FailsClosedBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+
+	aliases := aliasconfig.Config{SQLQuery: []aliasconfig.Query{
+		{Alias: "q", BaseURL: srv.URL, Path: "/q", QueryID: "q"},
+	}}
+	conn := sqlquery.New(aliases, nil, "")
+	for name, ctx := range map[string]context.Context{
+		"nothing":     context.Background(),
+		"tenant only": shared.WithTenant(context.Background(), "tenant-1"),
+		"actor only":  shared.WithActor(context.Background(), "principal-sub"),
+	} {
+		_, err := conn.Execute(ctx, map[string]any{"queryAlias": "q"})
+		require.ErrorIs(t, err, shared.ErrMissingInternalAuth, name)
+	}
+	assert.Zero(t, hits.Load())
+}
+
 func TestSQLQuery_ParamCountMismatch(t *testing.T) {
 	t.Parallel()
 
