@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with **workflow-connecto
 
 ## What This Repo Is
 
-`workflow-connectors` is a **private Go library** (module `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`, `go 1.26.9`, platform-pgcommon **v2.0.1**). It is consumed as a module dependency and **never deployed**: there is no binary, image, Dockerfile or runtime configuration. **Status:** v2.0.0 is the current release; the CHANGELOG `[2.1.0]` section (production-readiness fixes and new exports; cut, to be tagged after PR #8 merges) is the next **v2.1.0**. It has two consumers:
+`workflow-connectors` is a **private Go library** (module `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`, `go 1.26.11`, platform-pgcommon **v2.0.1**). It is consumed as a module dependency and **never deployed**: there is no binary, image, Dockerfile or runtime configuration. **Status:** v2.0.0 is the current release; the CHANGELOG `[2.1.0]` section (production-readiness fixes and new exports; cut, to be tagged after PR #8 merges) is the next **v2.1.0**. It has two consumers:
 
 - **`execution_service`'s `cmd/connector-worker`** (run side) imports `pkg/connectors` and its provider adapters, builds the connectors with `connectors.New(connectors.Config{…})`, and calls `Execute` per task. It is the composition root: it owns the pgcommon pool, the go-redis client, the S3 client, OpenBao secret resolution, retries and metrics. Wiring guide: [`docs/integration/connector-worker.md`](../docs/integration/connector-worker.md).
 - **`workflow-definition-service`** (compile side) imports only `pkg/registry` (connector types, input/output field tables, retry policies), which must stay dependency-free.

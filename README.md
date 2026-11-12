@@ -3,7 +3,7 @@
 The shared connector library for the workflow engine — the **fixed catalogue of automatic BPMN service tasks** (`connector:`-prefixed) and their implementations. It owns the catalogue metadata the authoring side compiles against (`pkg/registry`) and the `Execute` implementations the Execution Service's connector worker runs (`pkg/connectors`): `storage` and `send-email` with real provider adapters, `rest-call` to internal platform services, and `chat-notify`. It has no process of its own — it runs inside `execution_service`'s `cmd/connector-worker`, which owns delivery, retries, credentials and completion.
 
 **Repository:** `github.com/BCBP-SOLUTIONS-FZC-LLC/workflow-connectors/v2`
-**Module:** Go 1.26.10 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
+**Module:** Go 1.26.11 · private module · a library: no server, no binary, no image, no database of its own (the Drive document registry and send intents run on the worker's PostgreSQL), and no logging, metrics, tracing or event code
 **Version:** **v2.2.0** is the current release (2026-10-22): `rest-call` and `sql-query` send the caller identity (`x-tenant-id`, `x-user-id`, `x-workflow-department-id`) and no `x-departments`; new exports only. See `CHANGELOG.md` `[2.2.0]`. **v2.1.0** (2026-10-13): production-readiness changes with new exports only, but some inputs that used to be accepted are now refused. See `CHANGELOG.md` `[2.1.0]` and [Upgrading from v2.0.0](#7-upgrading-from-v200); v2.0.0 (2026-10-10) precedes it
 **Design:** one LLD, `docs/lld/workflow-connectors-library-lld.md` (**rev 1.20**; rev 1.18 is the one signed off, for v2.0.0). Part I (§1–§21) is the module design; Part II (§S1–§S11) is the *Automatic Connector Tasks & Connector Workers* system design (rev 8.14) across `workflow-models`, `definition_service`, `execution_service` and this module. Where they disagree, Part II is authoritative. "LLD §S…" and "Decision #N" in this README cite Part II; "module LLD §…" cites Part I.
 
@@ -301,7 +301,7 @@ v2.1.0 changes no signature, but refuses some inputs v2.0.0 accepted and needs i
 
 ### Prerequisites
 
-- Go 1.26.10+
+- Go 1.26.11+
 - `GOPRIVATE=github.com/BCBP-SOLUTIONS-FZC-LLC/*` (`GONOSUMDB` too) and an SSH key registered with the BCBP org
 - `.env` (created from `.env-example` by `make setup`, git-ignored): the compose host ports (`WC_*`), the `TEST_*` variables the integration tests read, and platform-pgcommon's `PG_*` / `MIGRATION_DATABASE_URL` pointed at the compose stack. The library itself reads no configuration from the environment (the GCS SDK under it honours `STORAGE_EMULATOR_HOST`: never set it for a worker; `gcp-gcs` refuses to build a client while it is set). `TEST_VALKEY_CLUSTER_ADDRS` lists seed nodes of the compose Valkey Cluster. Under `make`, a value in `.env` **overrides** the same variable exported in your shell: override one run with `make <target> VAR=value` or `make -e`. Docker for the integration infrastructure in `docker-compose.yml` (PostgreSQL, PgBouncer, Valkey, floci S3, and the `valkey-cluster` profile) — `make test-unit` needs none
 

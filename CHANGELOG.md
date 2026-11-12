@@ -12,6 +12,7 @@ The internal token is optional. Proposed version **2.4.0**: no exported name cha
 ### Changed
 
 - `connectors.New` no longer fails on an empty `Config.InternalToken`. `rest-call` and `sql-query` send `x-internal-token` only when a token is configured; without one the callee authenticates the worker by mesh identity. The tenant and actor requirements (`x-tenant-id`, `x-user-id`, `ErrMissingInternalAuth` before any request) are unchanged.
+- The module requires Go 1.26.11 (the `go` directive was 1.26.10).
 
 ### Security
 
