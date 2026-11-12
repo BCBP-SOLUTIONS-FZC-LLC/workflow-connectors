@@ -77,7 +77,7 @@ Details: [`docs/runbooks/document-refs.md`](../runbooks/document-refs.md).
 
 Provider clients — the S3, Azure and GCS clients and the Gmail / Graph OAuth token requests included — never follow redirects and speak HTTP/1.1 only, so a proxy must not require HTTP/2. They honour `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` like Go's default transport.
 
-Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient` nil (or a client whose `Transport` is nil) the internal transport has `Proxy` unset, so `x-internal-token` and the caller identity cannot reach an egress proxy named by `HTTP_PROXY` / `HTTPS_PROXY`. A worker that passes its own `*http.Transport` keeps that transport's `Proxy` setting and must not point it at a proxy outside the platform.
+Internal `rest-call` traffic never goes through a proxy: with `Config.HTTPClient` nil (or a client whose `Transport` is nil) the internal transport has `Proxy` unset, so `x-internal-token` (when configured) and the caller identity cannot reach an egress proxy named by `HTTP_PROXY` / `HTTPS_PROXY`. A worker that passes its own `*http.Transport` keeps that transport's `Proxy` setting and must not point it at a proxy outside the platform.
 
 ## 3. Configuration
 
@@ -94,7 +94,7 @@ The library reads no environment variables (one SDK it builds does: see `STORAGE
 | `MIGRATION_DATABASE_URL` | `pgcommon.MigrationDSNFromEnv` | Direct PostgreSQL, DDL role |
 | Valkey address, user, password, TLS | The worker's go-redis client | The ACL user above |
 | Document bucket name and region | The worker's `*s3.Client` | The platform bucket |
-| Internal service token | `connectors.Config.InternalToken` | Required; `connectors.New` fails without it. Sent as `x-internal-token` on every `rest-call`. |
+| Internal service token | `connectors.Config.InternalToken` | Optional. Sent as `x-internal-token` on every `rest-call` only when set; without one the callee authenticates the worker by mesh identity. |
 | Alias registry | `connectors.Config.Aliases` | `aliasconfig.Load(path)` (strict YAML: an unknown or misspelt key, or a second document with content, is an error — empty documents such as `---` or `--- ~` are ignored; validated on load), or built in code. `connectors.New` runs `Validate()` on it either way and fails on an invalid alias (for example a `baseURL` with a query or fragment, or a `pathTemplate` with a `#` — write `%23` —, a raw space or other character invalid in a URL outside a `{placeholder}`, an unterminated `{`, a bad `%` escape, or a `;` or unparsable query). |
 
 **Tenant credentials are not configuration.** Fields the registry marks `secret_ref` (`registry.Field.IsSecretRef()`) are resolved per task from OpenBao for the job's own tenant (§5).
@@ -261,7 +261,7 @@ type Deps struct {
 	S3            *s3.Client            // the worker's own IAM role, never a tenant's
 	DocsBucket    string                // platform-owned bucket, lifecycle rule on docrefs/
 	Aliases       aliasconfig.Config    // the worker's internal-service alias registry
-	InternalToken string                // service-to-service token for rest-call
+	InternalToken string                // optional; empty: no x-internal-token header (mesh identity)
 	Log           *slog.Logger
 }
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The internal token is optional. Proposed version **2.4.0**: no exported name changes (`make api-compat API_NEW_VERSION=v2.4.0` to confirm), so this is a MINOR. **Upgrade:** none required; a worker that passes `InternalToken` keeps sending `x-internal-token`, and a worker that leaves it empty now builds and sends no such header.
+
+### Changed
+
+- `connectors.New` no longer fails on an empty `Config.InternalToken`. `rest-call` and `sql-query` send `x-internal-token` only when a token is configured; without one the callee authenticates the worker by mesh identity. The tenant and actor requirements (`x-tenant-id`, `x-user-id`, `ErrMissingInternalAuth` before any request) are unchanged.
+
 ### Security
 
 - `.trivyignore` accepts GO-2026-5932 (the unmaintained `golang.org/x/crypto/openpgp` package, whose fix is not in a release) until 2026-12-04. The module reaches only `x/crypto/pkcs12` through the Azure blob driver and imports no openpgp code. Nothing else is ignored.

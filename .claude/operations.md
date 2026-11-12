@@ -8,7 +8,7 @@ The library has no process, server or configuration of its own; "operations" her
 
 - **Credentials arrive resolved.** The worker resolves every `secret_ref` field (`registry.Field.IsSecretRef()`) from OpenBao for the job's own tenant and passes the value in `Execute`'s input. The library never sees an OpenBao path.
 - **Credentials live only in memory**, in the storage / send-email client caches, keyed by a SHA-256 of every credential field (plus bucket or sender), capped at 256 entries. A retired client is closed once its last call finishes. Credentials are never logged, returned in outputs or errors, or persisted.
-- **Internal calls carry caller identity:** `x-internal-token` (`Config.InternalToken`, required by `New`), `x-tenant-id` (`WithTenant`), `x-user-id` (`WithActor`, the tenant's automation principal) and, optionally, `x-workflow-department-id` (`WithLaneDepartment`); a missing tenant or actor, or a CR/LF in any of them, fails before any request. No `x-departments` is sent.
+- **Internal calls carry caller identity:** `x-internal-token` only when `Config.InternalToken` is set (mesh identity otherwise), `x-tenant-id` (`WithTenant`), `x-user-id` (`WithActor`, the tenant's automation principal) and, optionally, `x-workflow-department-id` (`WithLaneDepartment`); a missing tenant or actor, or a CR/LF in any of them, fails before any request. No `x-departments` is sent.
 
 ### 1.2 Guards in the code
 

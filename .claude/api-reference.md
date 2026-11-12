@@ -35,14 +35,14 @@ type Connector interface {
 type Config struct {
     Aliases            aliasconfig.Config
     HTTPClient         *http.Client                              // nil: default; see shared.InternalHTTPClient
-    InternalToken      string                                    // required
+    InternalToken      string                                    // optional; x-internal-token only when set
     StorageProviders   map[string]storage.ProviderConstructor
     SendEmailProviders map[string]sendemail.ProviderConstructor
     ChatNotifyClient   chatnotify.ProviderClient                 // nil: every call is ErrValidation
     SendIntents        sendintent.Store                          // nil: messageKey is ErrValidation
     DocRefs            *docref.Service                           // nil: createDocument, ref content, attachments are ErrValidation
 }
-func New(cfg Config) (map[string]Connector, error) // error for an empty InternalToken or cfg.Aliases.Validate() failing; storage / send-email values implement interface{ ResetClients() }
+func New(cfg Config) (map[string]Connector, error) // error when cfg.Aliases.Validate() fails (InternalToken is optional); storage / send-email values implement interface{ ResetClients() }
 ```
 
 | Identifier | Notes |

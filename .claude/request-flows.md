@@ -4,7 +4,7 @@ All flows run inside the worker's `Execute` call; the library starts no goroutin
 
 ## 1. Construction — `connectors.New(cfg)`
 
-1. Empty `InternalToken` → error (rest-call sends it on every request); `cfg.Aliases.Validate()` failing → error (a zero `Aliases` is valid).
+1. `InternalToken` is optional (rest-call and sql-query send `x-internal-token` only when it is set); `cfg.Aliases.Validate()` failing → error (a zero `Aliases` is valid).
 2. Builds `storage.New(cfg.StorageProviders, cfg.DocRefs)`, `sendemail.New(cfg.SendEmailProviders, cfg.DocRefs, sendemail.WithSendIntents(cfg.SendIntents))`, `chatnotify.New(cfg.ChatNotifyClient)`, `restcall.New(cfg.Aliases, cfg.HTTPClient, cfg.InternalToken)`.
 3. `restcall.New` wraps the client with `shared.InternalHTTPClient` (copy, no redirects, HTTP/1.1 only; nil client or transport → `shared.BaseTransport()` with no proxy and no client-wide timeout; a wrapped `http.DefaultTransport` never panics).
 4. Returns `map[type]Connector`; a duplicate `Type()` panics (`indexByType`). Each call creates fresh client caches (limit 256 each for storage and send-email).
